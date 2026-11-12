@@ -1,0 +1,119 @@
+# myTVBox — HarmonyOS NEXT 智慧屏 TVBox 客户端
+
+一个跑在 **HarmonyOS NEXT 智慧屏 / 电视**上的 TVBox 形态客户端：填入你自己的**配置地址**（JSON 接口），
+即可浏览多站点海报墙、切换线路、选集播放，并解析直播频道表。
+
+> **本工程不包含任何影视内容、采集站地址、直播源或账号。** 仓库是干净的代码：
+> 首次启动没有任何站点，需要你在设置页填入自己的配置地址。
+> 请只接入你拥有合法授权的内容，使用风险自负（见文末「免责声明」）。
+
+---
+
+## 一、它做什么
+
+| 模块 | 说明 |
+|---|---|
+| 配置地址 | 点播源 / 直播源**两个独立槽位**，可分别填写，互不影响；支持普通配置（`sites` / `parses` / `lives`）与多仓配置（`urls`）；本地落盘缓存，离线可打开 |
+| 手机扫码推送 | 电视自己起一个 HTTP 服务，手机连同一 Wi-Fi 扫码打开网页，粘贴地址推送，电视自动填入。无后端、带一次性 token |
+| Default 空容器 | 内置一个空的 `builtin://default`，用来**收纳你自己试出来的站点**。收的是站点本身（api / type / ext），不是配置地址，所以原接口失效也不影响 |
+| 点播首页 | 两级分类、海报墙、滚动加载、切换站点 / 分类即时响应；排序（最新 / 评分 × 升序 / 降序）、地区 / 年份筛选 |
+| 豆瓣评分 + 海报 | 站点没海报时从豆瓣补图并取评分，本地缓存；可登录豆瓣提高配额，**默认未登录** |
+| 详情 / 播放 | 多线路切换、选集、收藏、看过的集变暗；`AVPlayer + XComponent` 播放，支持续播、点进度条跳转、倍速、快进退、上/下集、播完自动连播、实际大小 / 全屏切换 |
+| 直播 | 解析 txt 频道表（`#genre#`）与 m3u；同名频道按 `tvg-id` 合并成多线路，点开自动试线路；频道收藏、已看标记 |
+| 家长锁 | 4 位 PIN 隐藏分类名含敏感词的分类，解锁有效期 30 分钟；点播分类与播放历史两份独立解锁态 |
+| 历史 | 按影片去重的播放记录，设了 PIN 后自动隐藏敏感分类的记录 |
+
+---
+
+## 二、能跑哪些站点
+
+关键看配置里 `sites[].type` 和 `sites[].api`：
+
+| 配置长相 | 能否运行 | 说明 |
+|---|---|---|
+| `"api": "https://xxx.com/api.php/provide/vod"` | ✅ | 苹果CMS V10 JSON 协议，本工程已实现 |
+| `"api": "http://..."` | ✅ | 已通过 `network_config.json` 放行明文 HTTP |
+| `"api": "csp_xxx"` / `js:...` / 带 `spider` jar | ❌ | 依赖 Android 侧的 `spider.jar` 运行时，鸿蒙没有 JVM，**无法执行** |
+
+所以 `type 3 / 4`、`csp_*`、js/jar 这类站点会在加载配置时被**直接过滤**，不会列出来。
+
+---
+
+## 三、编译运行
+
+**环境**
+
+- DevEco Studio（配套 HarmonyOS SDK，本工程 `compatibleSdkVersion = 6.1.1(24)`）
+- 设备：`deviceTypes: ["tv"]`，即智慧屏 / 电视；手机和平板默认装不上
+
+**步骤**
+
+1. 用 DevEco Studio 打开本目录；
+2. 首次打开会提示未配置签名 —— 点 **自动签名**（`File > Project Structure > Signing Configs > Automatically generate signature`），
+   这一步会用你自己的华为开发者账号生成调试证书与 Profile；仓库里**故意不含任何签名配置**；
+3. 连上设备后直接运行。
+
+命令行编译（需先按上面的方式配好签名）：
+
+```bash
+hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
+```
+
+产物在 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+> 鸿蒙 HAP **不能点击安装**，必须用 `hdc install -r <hap>` 或 DevEco Studio 安装。
+> 调试包绑定了你账号下登记的设备 UDID，换设备需要重新自动签名。
+
+---
+
+## 四、首次使用
+
+打开 App 后首页会提示「还没有点播源」，点「去设置」：
+
+1. 在「点播源」填一个配置地址（例如你自己的苹果CMS 接口，或一份 `{"sites":[...]}` 配置）；
+2. 需要直播就单独填「直播源」，可填 m3u / txt / 带 `lives` 的配置；
+3. 载入后回首页即可浏览。
+
+也可用「手机推送」：点电视上的「手机推送」出二维码，手机扫码在网页里粘贴地址。
+
+---
+
+## 五、已知限制
+
+- **灵犀指向式遥控器（空鼠）在播放页收不到标准按键事件**：方向键、OK 键都到不了播放页。
+  播放页的操作请用光标点控制条按钮；画面**长按**可播放 / 暂停，点一下显隐控制条。
+  `Player.ets` 的 `handleKey()` 保留了完整的方向键 / 媒体键映射，换普通红外或蓝牙遥控器即生效。
+- **MKV 内嵌字幕不显示，也无法切换内嵌音轨**：当前只把地址交给 AVPlayer 按默认轨播放。
+  SDK 的字幕事件只对外挂字幕触发，且外挂字幕接口要求本地 fd，网络直链走不通。
+- **不支持 spider 型站点**（见第二节）。
+- 豆瓣未登录时搜索配额较紧，补图较慢；设置页可填 Cookie 登录（自备账号）。
+
+---
+
+## 六、目录结构
+
+```
+entry/src/main/ets/
+├── pages/          Index 点播首页 / Live 直播 / Detail 详情 / Player 播放
+│                   Search 搜索 / My 收藏 / History 历史 / Settings 设置
+├── components/     PosterCard 海报卡 / TopBar 顶栏 / QrView 二维码
+├── model/          TvBoxModels 配置模型 / VodItem 影片
+└── utils/          ConfigStore 配置链路 / ConfigParser 解析 / SiteApi 采集站协议
+                    LiveApi 直播解析 / PosterStore 刮削 / RatingStore 评分
+                    PinStore 家长锁 / PlayProgress 进度 / PushServer 手机推送
+```
+
+配置 JSON 的字段含义与原版 TVBox 一致，`model/TvBoxModels.ets` 里有完整注释。
+
+---
+
+## 七、免责声明
+
+- 本工程**只提供客户端软件**，不提供、不托管、不推荐任何影视内容、采集接口或直播源。
+- 仓库内不含任何第三方内容源地址。使用者自行填入的地址与本工程作者无关。
+- 请遵守你所在地区的法律法规，仅将本软件用于你有权访问的内容。
+- 软件按「现状」提供，不附带任何明示或暗示的担保。
+
+## 许可
+
+Apache License 2.0，见 [LICENSE](LICENSE)。

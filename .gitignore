@@ -1,0 +1,32 @@
+# 依赖
+/node_modules
+/oh_modules
+**/oh_modules
+
+# DevEco / 构建产物
+/.idea
+/.hvigor
+**/build
+**/.preview
+/.appanalyzer
+/local.properties
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+
+# 签名材料：绝不入库
+*.p12
+*.cer
+*.p7b
+*.jks
+*.keystore
+*.csr
+signature/
+.signing/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+*.log

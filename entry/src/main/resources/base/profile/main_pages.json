@@ -1,0 +1,12 @@
+{
+  "src": [
+    "pages/Index",
+    "pages/Live",
+    "pages/My",
+    "pages/History",
+    "pages/Settings",
+    "pages/Detail",
+    "pages/Player",
+    "pages/Search"
+  ]
+}
