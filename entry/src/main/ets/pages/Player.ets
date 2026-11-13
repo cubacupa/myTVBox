@@ -1432,6 +1432,20 @@ struct Player {
     }
   }
 
+  /**
+   * 按钮组之间的留白。
+   * Row 的 space 是统一值，没法只把某两处拉宽，所以放一个不可命中的占位撑开：
+   * 实际间距 = 18 + 8 + 18 = 44vp，组内仍是 18vp。
+   * 只敢留 8vp：电视是 4K/密度 3，即 1280vp 宽，8 个按钮本来就把这一行占得差不多满了。
+   */
+  @Builder
+  gapBtn() {
+    Row()
+      .width(8)
+      .height(1)
+      .hitTestBehavior(HitTestMode.None)
+  }
+
   @Builder
   ctrlBtn(action: string) {
     // 文字必须在 builder 内部读状态：@Builder 传参是按值传递，父状态变化不会重建，
@@ -1628,16 +1642,19 @@ struct Player {
             .width('100%')
             .alignItems(VerticalAlign.Center)
 
+            // 按用途分组排：集数切换 → 快进退 → 播放/暂停 → 其它。
+            // 组间留出更大的间距，遥控器光标扫过时不容易点错相邻的按钮。
             Row({ space: 18 }) {
               if (this.canSwitchEp()) {
                 this.ctrlBtn('prev')
+                this.ctrlBtn('next')
+                this.gapBtn()
               }
               this.ctrlBtn('back')
-              this.ctrlBtn('toggle')
               this.ctrlBtn('fwd')
-              if (this.canSwitchEp()) {
-                this.ctrlBtn('next')
-              }
+              this.gapBtn()
+              this.ctrlBtn('toggle')
+              this.gapBtn()
               this.ctrlBtn('speed')
               this.ctrlBtn('size')
               this.ctrlBtn('exit')
