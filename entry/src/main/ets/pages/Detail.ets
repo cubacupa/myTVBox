@@ -12,6 +12,8 @@ import { PlayProgress } from '../utils/PlayProgress';
 
 interface DetailParams {
   key: string;
+  /** 旧版首页传的是 siteKey，两个都认，免得换页面进来站点丢了 */
+  siteKey?: string;
   vodId: string;
 }
 
@@ -27,6 +29,10 @@ struct Detail {
   @State remarks: string = '';
   @State typeName: string = '';
   @State year: string = '';
+  /** 豆瓣元信息：类型标签 / 片长 / 地区。拿不到就用采集站的分类名兜底 */
+  @State mGenre: string[] = [];
+  @State mDuration: string[] = [];
+  @State mCountry: string[] = [];
   @State content: string = '';
   @State lines: PlayLine[] = [];
   @State lineIdx: number = 0;
@@ -40,6 +46,10 @@ struct Detail {
   /** 最近起播的那一集：橙字 + 橙框，也就是「上次看到」 */
   @State lastEp: string = '';
   @StorageProp('posterTick') @Watch('onPosterTick') posterTick: number = 0;
+  /** 评分后台补齐信号：读它可让角标重绘 */
+  @StorageProp('ratingTick') ratingTick: number = 0;
+  /** 遥控器焦点标记（现代版自绘焦点，不用系统默认描边） */
+  @State focusId: string = '';
   private doubanId: string = '';
   private siteKey: string = '';
   private vodId: string = '';
@@ -68,7 +78,8 @@ struct Detail {
 
   aboutToAppear(): void {
     const p = router.getParams() as DetailParams;
-    this.siteKey = p.key ?? '';
+    this.siteKey = p.key !== undefined && p.key.length > 0 ? p.key
+      : (p.siteKey === undefined ? '' : p.siteKey);
     this.vodId = p.vodId ?? '';
     this.refreshWatched();
     this.load();
@@ -231,6 +242,23 @@ struct Detail {
       this.year = d.vod_year ?? '';
       this.content = (d.vod_content ?? '').replace(/<[^>]+>/g, '');
       this.lines = SiteApi.parseLines(d);
+      // 豆瓣类型 / 片长：本地缓存有就立刻出来，没有就补一次（详情页只有一部片，等得起）
+      if (this.doubanId.length > 0) {
+        const cached = RatingStore.metaCached(this.doubanId);
+        if (cached !== null) {
+          this.mGenre = cached.genres;
+          this.mDuration = cached.durations;
+          this.mCountry = cached.countries;
+        } else {
+          RatingStore.ensureMeta(this.doubanId).then((m) => {
+            if (m !== null) {
+              this.mGenre = m.genres;
+              this.mDuration = m.durations;
+              this.mCountry = m.countries;
+            }
+          }).catch(() => {});
+        }
+      }
       // 详情页也能补图：本地已有就立刻显示，没有就排进刮削队列
       this.syncPoster();
       RatingStore.warm([this.asItem()]);
@@ -245,6 +273,7 @@ struct Detail {
       this.err = '详情加载失败：' + (e as Error).message;
     } finally {
       this.loading = false;
+      setTimeout(() => { this.getUIContext().getFocusController().requestFocus('detail-play'); }, 300);
     }
   }
 
@@ -320,174 +349,446 @@ struct Detail {
     });
   }
 
-  build() {
+  // ---------------- 现代版视觉（数据与交互沿用上面的方法） ----------------
+
+  /** 顶部标签：优先豆瓣类型（悬疑 / 犯罪 / 剧情），没有才退回采集站的分类名 */
+  private tags(): string[] {
+    if (this.mGenre.length > 0) {
+      return this.mGenre;
+    }
+    if (this.typeName.length > 0) {
+      return [this.typeName];
+    }
+    return [];
+  }
+
+  /** 片长：豆瓣原样给「120分钟」；多集剧加个 /集，免得误以为是整部时长 */
+  private durText(): string {
+    if (this.mDuration.length === 0) {
+      return '';
+    }
+    const d: string = this.mDuration[0];
+    return this.eps().length > 1 ? d + '/集' : d;
+  }
+
+  /**
+   * 元信息行：年份 · 地区 · 片长 · 更新状态 · 资源站。
+   * 分类名不放在这里 —— 它已经在上面那排标签里了，重复一遍纯属占地方。
+   */
+  private metaLine(): string {
+    const parts: string[] = [];
+    if (this.year.length > 0) {
+      parts.push(this.year);
+    }
+    if (this.mCountry.length > 0) {
+      parts.push(this.mCountry[0]);
+    }
+    if (this.durText().length > 0) {
+      parts.push(this.durText());
+    }
+    if (this.remarks.length > 0) {
+      parts.push(this.remarks);
+    }
+    if (this.lines.length > 0) {
+      parts.push(this.siteLabel());
+    }
+    return parts.join(' · ');
+  }
+
+  /** 豆瓣评分：站点自带或后台刮削来的缓存；没有就返回空串，那一整段不画 */
+  private scoreText(): string {
+    if (this.ratingTick < 0) {
+      return '';
+    }
+    return RatingStore.label(this.asItem());
+  }
+
+  /** 资源站名（当前站点） */
+  private siteLabel(): string {
+    const site = AppState.findSite(this.siteKey);
+    if (site !== null && site.name.length > 0) {
+      return site.name;
+    }
+    const cur = AppState.currentSite;
+    return cur !== null ? cur.name : '—';
+  }
+
+  /** 详情页可用的海报：优先豆瓣刮削图（本地），否则站点图 */
+  private heroPicUrl(): string {
+    return this.poster.length > 0 ? this.poster : this.pic;
+  }
+
+  private playLabel(): string {
+    if (this.lastEp.length > 0) {
+      return '继续观看 · ' + this.lastEp;
+    }
+    return '播放';
+  }
+
+  private firstEp(): VodEpisode | null {
+    const list: VodEpisode[] = this.eps();
+    return list.length > 0 ? list[0] : null;
+  }
+
+  @Builder
+  chip(text: string, accent: boolean, wide: boolean) {
+    Row() {
+      Text(text)
+        .fontSize(13)
+        .fontWeight(accent ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(accent ? '#FFB37A' : '#C9C9D4')
+        .maxLines(1)
+    }
+    .height(30)
+    .padding({ left: wide ? 16 : 13, right: wide ? 16 : 13 })
+    .borderRadius(9)
+    .backgroundColor(accent ? '#22FF8A3D' : '#14FFFFFF')
+    .border({ width: 1, color: accent ? '#73FF8A3D' : '#28FFFFFF' })
+    .margin({ right: 10 })
+  }
+
+  @Builder
+  epCell(ep: VodEpisode, idx: number) {
     Column() {
-      Row() {
-        Button('‹ 返回').fontSize(15).height(40)
-          .onClick(() => { router.back(); })
-        Text(this.name).fontSize(20).fontColor('#ffffff').margin({ left: 16 })
-        Blank()
-        Button(this.fav ? '★ 已收藏' : '☆ 收藏')
-          .fontSize(15)
-          .height(40)
-          .backgroundColor(this.fav ? '#4a3315' : '#2a2a2a')
-          .fontColor(this.fav ? '#FF6B00' : '#ffffff')
-          .onClick(() => { this.toggleFav(); })
+      Text(ep.name)
+        .fontSize(13)
+        .fontWeight(this.lastEp === ep.name ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.lastEp === ep.name ? '#FFB37A'
+          : (this.watchedEps.indexOf(ep.name) >= 0 ? '#7A7A86' : '#C9C9D4'))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Center)
+        .width('100%')
+    }
+    .width('100%')
+    .height(60)
+    .justifyContent(FlexAlign.Center)
+    .borderRadius(14)
+    .backgroundColor(this.lastEp === ep.name ? '#22FF8A3D' : '#10FFFFFF')
+    .border({
+      width: this.lastEp === ep.name ? 1.5 : 1,
+      color: this.lastEp === ep.name ? '#8CFF8A3D' : '#1AFFFFFF'
+    })
+    .focusable(true)
+    .onFocus(() => { this.focusId = 'ep-' + idx; })
+    .onBlur(() => { this.focusId = ''; })
+    .border({
+      width: this.focusId === ('ep-' + idx) ? 2 : (this.lastEp === ep.name ? 1.5 : 1),
+      color: this.focusId === ('ep-' + idx) ? '#FFD9BC'
+        : (this.lastEp === ep.name ? '#8CFF8A3D' : '#1AFFFFFF')
+    })
+    .onClick(() => { this.play(ep); })
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      // ---- 背景：海报模糊铺底 + 压暗 ----
+      if (this.heroPicUrl().length > 0) {
+        Image(this.heroPicUrl())
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .blur(70)
+          .opacity(0.44)
       }
-      .width('100%')
-      .height(64)
-      .padding({ left: 24, right: 24 })
+      Column()
+        .width('100%')
+        .height('100%')
+        .linearGradient({
+          angle: 155,
+          colors: [['#B308090B', 0.0], ['#D908090B', 0.5], ['#08090B', 0.88]]
+        })
 
       if (this.loading) {
         Column() {
           LoadingProgress().width(48).height(48)
-        }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
-      } else if (this.err && this.lines.length === 0) {
-        Column() {
-          Text(this.err).fontSize(16).fontColor('#ff7777')
-          Button('返回').margin({ top: 20 }).onClick(() => { router.back(); })
-        }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
-      } else {
-        Row() {
-          Stack() {
-            // 占位框：站点不给图 / 图 404 时显示，避免一片空白
-            Column() {
-              Text(this.name && this.name.length > 0 ? this.name.substring(0, 1) : '影')
-                .fontSize(60)
-                .fontWeight(FontWeight.Bold)
-                .fontColor('#4a4a4a')
-              Text('暂无海报')
-                .fontSize(13)
-                .fontColor('#5a5a5a')
-                .margin({ top: 10 })
-            }
-            .width(250)
-            .height(356)
-            .justifyContent(FlexAlign.Center)
-            .alignItems(HorizontalAlign.Center)
-            .backgroundColor('#232323')
-            .borderRadius(10)
-            .border({ width: 1, color: '#3a3a3a' })
-
-            if (this.pic && this.pic.length > 0) {
-              Image(this.pic)
-                .width(250)
-                .height(356)
-                .objectFit(ImageFit.Cover)
-                .borderRadius(10)
-                .zIndex(1)
-                .onError(() => {})
-            }
-
-            // 豆瓣刮削图盖在站点图上面（同 PosterCard 的层级规则）
-            if (this.poster.length > 0) {
-              Image(this.poster)
-                .width(250)
-                .height(356)
-                .objectFit(ImageFit.Cover)
-                .borderRadius(10)
-                .zIndex(2)
-                .onError(() => { this.poster = ''; })
-            }
-          }
-          .width(250)
-          .height(356)
-          .borderRadius(10)
-
-          Column() {
-            Text(this.name).fontSize(30).fontColor('#ffffff').fontWeight(FontWeight.Bold)
-            Row() {
-              if (this.typeName) {
-                Text(this.typeName).fontSize(14).fontColor('#cccccc').margin({ right: 16 })
-              }
-              if (this.year) {
-                Text(this.year).fontSize(14).fontColor('#cccccc').margin({ right: 16 })
-              }
-              if (this.remarks) {
-                Text(this.remarks).fontSize(14).fontColor('#FF6B00')
-              }
-            }.margin({ top: 10 })
-
-            Text(this.content)
-              .fontSize(14)
-              .fontColor('#aaaaaa')
-              .maxLines(3)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .margin({ top: 12 })
-              .width('100%')
-
-            Row() {
-              Text('线路').fontSize(14).fontColor('#888888').margin({ right: 12 })
-              List({ space: 10 }) {
-                ForEach(this.lines, (l: PlayLine, idx: number) => {
-                  ListItem() {
-                    Text(l.name)
-                      .fontSize(14)
-                      .fontColor(idx === this.lineIdx ? '#ffffff' : '#cccccc')
-                      .backgroundColor(idx === this.lineIdx ? '#FF6B00' : '#2a2a2a')
-                      .padding({ left: 14, right: 14, top: 7, bottom: 7 })
-                      .borderRadius(6)
-                      .focusable(true)
-                      .onClick(() => { this.lineIdx = idx; })
-                  }
-                }, (l: PlayLine, idx: number) => l.name + String(idx))
-              }
-              .listDirection(Axis.Horizontal)
-              .height(46)
-              .layoutWeight(1)
-              .scrollBar(BarState.Off)
-            }
-            .width('100%')
-            .margin({ top: 16 })
-
-            Text('选集').fontSize(14).fontColor('#888888').margin({ top: 10 })
-
-            Grid() {
-              ForEach(this.eps(), (ep: VodEpisode, idx: number) => {
-                GridItem() {
-                  Text(ep.name)
-                    .fontSize(14)
-                    // 上次看到 = 橙字橙框；其余看过的压暗；没看过保持原样
-                    .fontColor(this.lastEp === ep.name ? '#FFB35C'
-                      : (this.watchedEps.indexOf(ep.name) >= 0 ? '#6e6e6e' : '#dddddd'))
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .width('100%')
-                    .padding({ top: 10, bottom: 10 })
-                    .textAlign(TextAlign.Center)
-                    .backgroundColor(this.lastEp === ep.name ? '#3a2a13'
-                      : (this.watchedEps.indexOf(ep.name) >= 0 ? '#1b1b1b' : '#262626'))
-                    .border({
-                      width: this.lastEp === ep.name ? 2 : 0,
-                      color: '#FF6B00'
-                    })
-                    .borderRadius(6)
-                    .focusable(true)
-                    .onClick(() => { this.play(ep); })
-                }
-              }, (ep: VodEpisode, idx: number) => ep.name + String(idx)
-                + (this.lastEp === ep.name ? 'L' : (this.watchedEps.indexOf(ep.name) >= 0 ? 'W' : '')))
-            }
-            .columnsTemplate('1fr 1fr 1fr 1fr 1fr')
-            .columnsGap(10)
-            .rowsGap(10)
-            .layoutWeight(1)
-            .width('100%')
-            .margin({ top: 8 })
-          }
-          .layoutWeight(1)
-          .height('100%')
-          .alignItems(HorizontalAlign.Start)
-          .margin({ left: 26 })
         }
         .width('100%')
-        .layoutWeight(1)
-        .padding({ left: 28, right: 28, bottom: 20 })
-        .alignItems(VerticalAlign.Top)
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+      } else if (this.err.length > 0 && this.lines.length === 0) {
+        Column({ space: 20 }) {
+          Text(this.err)
+            .fontSize(16)
+            .fontColor('#FF8B7A')
+          Row() {
+            Text('返回')
+              .fontSize(16)
+              .fontColor('#EDEDF2')
+          }
+          .height(52)
+          .padding({ left: 30, right: 30 })
+          .borderRadius(26)
+          .backgroundColor('#16FFFFFF')
+          .focusable(true)
+          .onClick(() => { router.back(); })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+      } else {
+        Column() {
+          // ---- 顶栏：只留返回。片名下面 58 号大字已经有一份，这里再写一遍是废信息 ----
+          Row({ space: 18 }) {
+            Row({ space: 8 }) {
+              SymbolGlyph($r('sys.symbol.chevron_left'))
+                .fontSize(17)
+                .fontColor(['#EDEDF2'])
+                .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+              Text('返回')
+                .fontSize(15)
+                .fontColor('#EDEDF2')
+            }
+            .height(48)
+            .padding({ left: 22, right: 26 })
+            .borderRadius(24)
+            .backgroundColor('#16FFFFFF')
+            .border({ width: 1, color: this.focusId === 'back' ? '#FFD9BC' : '#24FFFFFF' })
+            .focusable(true)
+            .onFocus(() => { this.focusId = 'back'; })
+            .onBlur(() => { this.focusId = ''; })
+            .onClick(() => { router.back(); })
+
+            Blank()
+          }
+          .width('100%')
+          .height(48)
+          .margin({ top: 28 })
+
+          // ---- 主体：海报 + 信息 ----
+          Row() {
+            // 竖版海报
+            Stack({ alignContent: Alignment.TopStart }) {
+              Row()
+                .width(268)
+                .height(392)
+                .borderRadius(20)
+                .backgroundColor('#1A1B22')
+              if (this.heroPicUrl().length > 0) {
+                Image(this.heroPicUrl())
+                  .width(268)
+                  .height(392)
+                  .objectFit(ImageFit.Cover)
+                  .borderRadius(20)
+              }
+              Column()
+                .width(268)
+                .height(130)
+                .margin({ top: 262 })
+                .linearGradient({
+                  angle: 180,
+                  colors: [['#00000000', 0.0], ['#99000000', 1.0]]
+                })
+            }
+            .width(268)
+            .height(392)
+            .clip(true)
+            .borderRadius(20)
+            .border({ width: 1, color: '#21FFFFFF' })
+            .shadow({ radius: 56, color: '#99000000', offsetX: 0, offsetY: 24 })
+
+            // 信息列
+            Column() {
+              // 标签：优先豆瓣类型（悬疑 / 犯罪 / 剧情），比采集站的「欧美动漫」有信息量
+              Row() {
+                ForEach(this.tags(), (t: string) => {
+                  this.chip(t, false, false)
+                }, (t: string, i: number) => t + String(i))
+              }
+              .margin({ bottom: 12 })
+
+              // 片名
+              Text(this.name)
+                .fontSize(50)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+
+              // 评分 + 元信息：年份 · 地区 · 片长 · 更新状态 · 资源站
+              Row({ space: 10 }) {
+                if (this.scoreText().length > 0) {
+                  Text('★')
+                    .fontSize(14)
+                    .fontColor('#FFC24B')
+                  Text(this.scoreText())
+                    .fontSize(17)
+                    .fontWeight(FontWeight.Bold)
+                    .fontColor('#FFD08A')
+                  Text('·')
+                    .fontSize(14)
+                    .fontColor('#55555F')
+                }
+                Text(this.metaLine())
+                  .fontSize(15)
+                  .fontColor('#A5A5B0')
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              .margin({ top: 12, bottom: 18 })
+
+              // 简介
+              Text(this.content.length > 0 ? this.content : '暂无简介')
+                .fontSize(15)
+                .lineHeight(24)
+                .fontColor('#9C9CA8')
+                .maxLines(3)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+
+              // 按钮 + 线路
+              Row({ space: 14 }) {
+                // 播放 / 继续观看
+                Row({ space: 10 }) {
+                  SymbolGlyph($r('sys.symbol.play_fill'))
+                    .fontSize(17)
+                    .fontColor(['#150A04'])
+                    .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+                  Text(this.playLabel())
+                    .fontSize(18)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor('#150A04')
+                }
+                .height(60)
+                .padding({ left: 32, right: 36 })
+                .borderRadius(18)
+                .linearGradient({
+                  angle: 90,
+                  colors: [['#FFA847', 0.0], ['#FF6138', 1.0]]
+                })
+                .shadow({ radius: 28, color: '#5CFF7833', offsetX: 0, offsetY: 12 })
+                .id('detail-play')
+                .focusable(true)
+                .defaultFocus(true)
+                .onFocus(() => { this.focusId = 'play'; })
+                .onBlur(() => { this.focusId = ''; })
+                .scale({ x: this.focusId === 'play' ? 1.04 : 1, y: this.focusId === 'play' ? 1.04 : 1 })
+                .animation({ duration: 140 })
+                .onClick(() => {
+                  const ep: VodEpisode | null = this.firstEp();
+                  if (ep !== null) {
+                    this.play(ep);
+                  }
+                })
+
+                // 收藏
+                Row({ space: 9 }) {
+                  SymbolGlyph(this.fav ? $r('sys.symbol.bookmark_fill') : $r('sys.symbol.bookmark'))
+                    .fontSize(17)
+                    .fontColor([this.fav ? '#FFB37A' : '#EDEDF2'])
+                    .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+                  Text(this.fav ? '已收藏' : '收藏')
+                    .fontSize(18)
+                    .fontColor(this.fav ? '#FFB37A' : '#EDEDF2')
+                }
+                .height(60)
+                .padding({ left: 28, right: 32 })
+                .borderRadius(18)
+                .backgroundColor('#16FFFFFF')
+                .border({ width: 1, color: this.focusId === 'fav' ? '#FFD9BC' : '#2EFFFFFF' })
+                .focusable(true)
+                .onFocus(() => { this.focusId = 'fav'; })
+                .onBlur(() => { this.focusId = ''; })
+                .onClick(() => { this.toggleFav(); })
+
+                // 线路切换
+                if (this.lines.length > 1) {
+                  Row({ space: 8 }) {
+                    Text('线路')
+                      .fontSize(13)
+                      .fontColor('#7E7E8A')
+                      .margin({ right: 4 })
+                    ForEach(this.lines, (l: PlayLine, i: number) => {
+                      Row() {
+                        Text(l.name)
+                          .fontSize(13)
+                          .fontWeight(i === this.lineIdx ? FontWeight.Medium : FontWeight.Normal)
+                          .fontColor(i === this.lineIdx ? '#FFB37A' : '#B0B0BC')
+                          .maxLines(1)
+                      }
+                      .height(38)
+                      .padding({ left: 15, right: 15 })
+                      .borderRadius(10)
+                      .backgroundColor(i === this.lineIdx ? '#22FF8A3D' : '#10FFFFFF')
+                      .border({
+                        width: 1,
+                        color: this.focusId === ('ln-' + i) ? '#FFD9BC'
+                          : (i === this.lineIdx ? '#8CFF8A3D' : '#1AFFFFFF')
+                      })
+                      .focusable(true)
+                      .onFocus(() => { this.focusId = 'ln-' + i; })
+                      .onBlur(() => { this.focusId = ''; })
+                      .onClick(() => { this.lineIdx = i; })
+                    }, (l: PlayLine, i: number) => l.name + String(i))
+                  }
+                }
+              }
+              .margin({ top: 20 })
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            .margin({ left: 48 })
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Top)
+          .margin({ top: 16 })
+
+          // ---- 选集 ----
+          Column() {
+            Row() {
+              Text('选集')
+                .fontSize(22)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
+              Text(this.eps().length > 0
+                ? '　共 ' + this.eps().length.toString() + ' 集' +
+                  (this.lastEp.length > 0 ? ' · 上次看到 ' + this.lastEp : '')
+                : '')
+                .fontSize(13)
+                .fontColor('#8E8E9A')
+              Blank()
+            }
+            .width('100%')
+            .margin({ bottom: 14 })
+
+            if (this.eps().length === 0) {
+              Text('这个片源没有返回播放地址')
+                .fontSize(14)
+                .fontColor('#8E8E9A')
+            } else {
+              Grid() {
+                ForEach(this.eps(), (ep: VodEpisode, idx: number) => {
+                  GridItem() {
+                    this.epCell(ep, idx)
+                  }
+                }, (ep: VodEpisode, idx: number) => ep.name + String(idx)
+                  + (this.lastEp === ep.name ? 'L' : (this.watchedEps.indexOf(ep.name) >= 0 ? 'W' : '')))
+              }
+              .columnsTemplate('1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr')
+              .columnsGap(12)
+              .rowsGap(12)
+              // 148 = 两行 60 + 行距 12 × 2 + 一点余量：整块落在 720 内，不再被屏幕底边切
+              .height(148)
+              .width('100%')
+              .scrollBar(BarState.Off)
+            }
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .margin({ top: 22 })
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ left: 88, right: 88 })
+        .alignItems(HorizontalAlign.Start)
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#161616')
+    .backgroundColor('#08090B')
   }
 }
+

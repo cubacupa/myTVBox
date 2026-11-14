@@ -12,7 +12,21 @@ import { DoubanAuth } from '../utils/DoubanAuth';
 import { HttpUtil } from '../utils/HttpUtil';
 import { pushServer } from '../utils/PushServer';
 import { QrView } from '../components/QrView';
-import { TopBar } from '../components/TopBar';
+import { SideNav } from '../components/SideNav';
+
+/**
+ * 设置页配色。与首页 / 收藏 / 历史同一套：近黑底 + 琥珀高亮，
+ * 卡片比底色亮一点、描边比卡片亮一点，层级靠明度差而不是靠颜色。
+ */
+const C_BG: string = '#08090B';
+const C_CARD: string = '#0F1015';
+const C_LINE: string = '#1A1B22';
+const C_ROW: string = '#14151C';
+const C_INPUT: string = '#16171E';
+const C_ACCENT: string = '#FF8A3D';
+const C_TEXT: string = '#E4E4EC';
+const C_SUB: string = '#8E8E9A';
+const C_DIM: string = '#6E6E7A';
 
 /** 豆瓣接口认这个浏览器 UA，okhttp 之类会回 1287 invalid_request */
 const UA_DOUBAN: string =
@@ -153,7 +167,7 @@ struct Settings {
     const ctx = getContext(this) as common.Context;
     this.saved = ConfigStore.savedApis(ctx);
     this.removableApis = MySitesStore.userApis(ctx);
-    this.pinHas = PinStore.isSet(ctx);
+    this.pinHas = PinStore.get(ctx).length === 4;
     this.doubanHas = DoubanAuth.has();
     this.doubanInfo = DoubanAuth.summary();
   }
@@ -502,7 +516,7 @@ struct Settings {
     this.msg = '已切换到「' + s.name + '」，回点播页刷新即可';
   }
 
-  /** 只有「用户自己收进 Default」的站点能删；Default 里没有任何预设站点 */
+  /** 只有「用户自己收进 Default」的站点能删；预设的暴风资源永远不显示删除 */
   private canRemoveSite(s: SiteCfg): boolean {
     return this.removableApis.indexOf(MySitesStore.normApi(s.api ?? '')) >= 0;
   }
@@ -547,9 +561,8 @@ struct Settings {
 
   private doClearPin(): void {
     const ctx = getContext(this) as common.Context;
-    const res: string = PinStore.verify(ctx, this.pinClearInput);
-    if (res.length > 0) {
-      this.pinClearErr = res;
+    if (this.pinClearInput.trim() !== PinStore.get(ctx)) {
+      this.pinClearErr = 'PIN 不对，无法清除';
       return;
     }
     PinStore.clear(ctx);
@@ -644,12 +657,83 @@ struct Settings {
 
   @Builder
   section(title: string) {
-    Text(title)
-      .fontSize(16)
-      .fontColor('#FF6B00')
-      .fontWeight(FontWeight.Bold)
-      .width('100%')
-      .margin({ top: 20, bottom: 10 })
+    Row({ space: 9 }) {
+      Row()
+        .width(3)
+        .height(13)
+        .borderRadius(2)
+        .backgroundColor(C_ACCENT)
+      Text(title)
+        .fontSize(13.5)
+        .fontColor('#C9C9D4')
+        .fontWeight(FontWeight.Medium)
+    }
+    .width('100%')
+    .margin({ top: 12, bottom: 14 })
+  }
+
+  /** 页面顶栏：标题 + 数据胶囊，右侧留给状态提示 */
+  @Builder
+  pageHeader() {
+    Row() {
+      Row({ space: 12 }) {
+        Text('设置')
+          .fontSize(34)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#FFFFFF')
+        Text(this.configName.length > 0 ? this.configName : '未载入')
+          .fontSize(12.5)
+          .fontColor(C_SUB)
+          .padding({ left: 9, right: 9, top: 3, bottom: 3 })
+          .borderRadius(7)
+          .backgroundColor('#12FFFFFF')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: 220 })
+        Text('点播源与直播源各存一份，改完立刻生效')
+          .fontSize(12.5)
+          .fontColor('#7E7E8A')
+      }
+      // 与标题垂直居中：底对齐时小字被压到 34 号字的字形底缘
+      .alignItems(VerticalAlign.Center)
+
+      Blank()
+
+      Row({ space: 10 }) {
+        Row({ space: 7 }) {
+          Text('可用站点')
+            .fontSize(12)
+            .fontColor(C_DIM)
+          Text(this.usableCount.toString())
+            .fontSize(12.5)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FFB37A')
+        }
+        .height(32)
+        .padding({ left: 13, right: 13 })
+        .borderRadius(16)
+        .backgroundColor('#12FFFFFF')
+
+        Row({ space: 7 }) {
+          Text('直播')
+            .fontSize(12)
+            .fontColor(C_DIM)
+          Text(this.lives.length.toString())
+            .fontSize(12.5)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.lives.length > 0 ? '#7FD88A' : C_SUB)
+        }
+        .height(32)
+        .padding({ left: 13, right: 13 })
+        .borderRadius(16)
+        .backgroundColor('#12FFFFFF')
+      }
+    }
+    .width('100%')
+    .height(56)
+    .alignItems(VerticalAlign.Center)
+    .padding({ left: 44, right: 36 })
+    .margin({ top: 26, bottom: 6 })
   }
 
   /**
@@ -664,11 +748,13 @@ struct Settings {
     TextInput({ text: this.vodName, placeholder: '名称（留空用域名）' })
       .layoutWeight(3)
       .height(46)
-      .fontSize(15)
-      .fontColor('#ffffff')
-      .placeholderColor('#777777')
-      .backgroundColor('#242424')
-      .borderRadius(8)
+      .fontSize(14)
+      .fontColor('#FFFFFF')
+      .placeholderColor('#5C5C68')
+      .backgroundColor(C_INPUT)
+      .borderRadius(12)
+      .border({ width: 1, color: '#20212A' })
+      .padding({ left: 14, right: 14 })
       .onChange((v: string) => { this.vodName = v; })
   }
 
@@ -677,11 +763,13 @@ struct Settings {
     TextInput({ text: this.vodAddr, placeholder: '配置地址 https://.../config.json' })
       .layoutWeight(7)
       .height(46)
-      .fontSize(15)
-      .fontColor('#ffffff')
-      .placeholderColor('#777777')
-      .backgroundColor('#242424')
-      .borderRadius(8)
+      .fontSize(14)
+      .fontColor('#FFFFFF')
+      .placeholderColor('#5C5C68')
+      .backgroundColor(C_INPUT)
+      .borderRadius(12)
+      .border({ width: 1, color: '#20212A' })
+      .padding({ left: 14, right: 14 })
       .onChange((v: string) => {
         this.vodAddr = v;
         this.suggestVodName();
@@ -690,27 +778,31 @@ struct Settings {
 
   @Builder
   liveNameBox() {
-    TextInput({ text: this.liveName, placeholder: '直播源名称' })
+    TextInput({ text: this.liveName, placeholder: '名称' })
       .layoutWeight(3)
       .height(46)
-      .fontSize(15)
-      .fontColor('#ffffff')
-      .placeholderColor('#777777')
-      .backgroundColor('#242424')
-      .borderRadius(8)
+      .fontSize(14)
+      .fontColor('#FFFFFF')
+      .placeholderColor('#5C5C68')
+      .backgroundColor(C_INPUT)
+      .borderRadius(12)
+      .border({ width: 1, color: '#20212A' })
+      .padding({ left: 14, right: 14 })
       .onChange((v: string) => { this.liveName = v; })
   }
 
   @Builder
   liveAddrBox() {
-    TextInput({ text: this.liveAddr, placeholder: '直播源：m3u / txt 直链，或带 lives 的配置' })
+    TextInput({ text: this.liveAddr, placeholder: 'm3u / txt 直链或配置地址' })
       .layoutWeight(7)
       .height(46)
-      .fontSize(15)
-      .fontColor('#ffffff')
-      .placeholderColor('#777777')
-      .backgroundColor('#242424')
-      .borderRadius(8)
+      .fontSize(14)
+      .fontColor('#FFFFFF')
+      .placeholderColor('#5C5C68')
+      .backgroundColor(C_INPUT)
+      .borderRadius(12)
+      .border({ width: 1, color: '#20212A' })
+      .padding({ left: 14, right: 14 })
       .onChange((v: string) => {
         this.liveAddr = v;
         this.suggestLiveName();
@@ -719,8 +811,19 @@ struct Settings {
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
-      Column() {
-        TopBar({ active: 3 })
+      // 背景：暗底 + 左上角一层暖光，和首页 / 收藏 / 历史同一套
+      Column()
+        .width('100%')
+        .height('100%')
+        .linearGradient({
+          angle: 160,
+          colors: [['#1F1A1208', 0.0], ['#0C08090B', 0.45], ['#08090B', 1.0]]
+        })
+
+      Row() {
+        SideNav({ active: 5, siteName: this.configName })
+        Column() {
+        this.pageHeader()
 
         Scroll() {
           Column() {
@@ -740,20 +843,20 @@ struct Settings {
                 // 操作按钮另起一行：占满整行宽度后靠右对齐，挤在第一行会把地址框压没
                 Row() {
                   Button('粘贴')
-                    .height(46).fontSize(14).fontColor('#ffffff').backgroundColor('#3a3a3a')
-                    .borderRadius(8)
+                    .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#232530')
+                    .borderRadius(12)
                     .onClick(() => { this.pasteInto(false); })
                   Button(this.busy === 'vod' ? '载入中…' : '载入')
-                    .height(46).fontSize(14).fontColor('#ffffff').backgroundColor('#FF6B00')
-                    .borderRadius(8).margin({ left: 10 })
+                    .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#FF8A3D')
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.loadVod(); })
                   Button('清空')
-                    .height(46).fontSize(14).fontColor('#aaaaaa').backgroundColor('#2a2a2a')
-                    .borderRadius(8).margin({ left: 10 })
+                    .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.clearVodInput(); })
                   Button('手机推送')
-                    .height(46).fontSize(13).fontColor('#8ecfff').backgroundColor('#28404f')
-                    .borderRadius(8).margin({ left: 10 })
+                    .height(46).fontSize(13).fontColor('#8ED0FF').backgroundColor('#152B33')
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.openPush('vod'); })
                 }
                 .width('100%')
@@ -766,17 +869,21 @@ struct Settings {
                   + ' · 解析 ' + this.parseCount + ' 个'
                   + (this.dropped > 0 ? ' · 已过滤 ' + this.dropped + ' 个 spider 站点（不显示）' : ''))
                   .fontSize(13)
-                  .fontColor('#9aa9b8')
+                  .fontColor('#8E8E9A')
                   .width('100%')
                   .margin({ top: 8 })
 
                 if (this.errMsg) {
                   Text('存储提示：' + this.errMsg)
-                    .fontSize(12).fontColor('#ff9a9a').width('100%').margin({ top: 6 })
+                    .fontSize(12).fontColor('#FF9A9A').width('100%').margin({ top: 6 })
                 }
               }
               .layoutWeight(1)
-              .padding({ right: 14 })
+              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
+              .margin({ right: 8 })
+              .backgroundColor(C_CARD)
+              .borderRadius(20)
+              .border({ width: 1, color: C_LINE })
 
               // ---------- 右：直播源 ----------
               Column() {
@@ -792,74 +899,78 @@ struct Settings {
                 // 操作按钮另起一行，与左列同样占满整行、靠右对齐
                 Row() {
                   Button('粘贴')
-                    .height(46).fontSize(14).fontColor('#ffffff').backgroundColor('#3a3a3a')
-                    .borderRadius(8)
+                    .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#232530')
+                    .borderRadius(12)
                     .onClick(() => { this.pasteInto(true); })
                   Button(this.busy === 'live' ? '载入中…' : '载入')
-                    .height(46).fontSize(14).fontColor('#ffffff').backgroundColor('#FF6B00')
-                    .borderRadius(8).margin({ left: 10 })
+                    .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#FF8A3D')
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.loadLiveSrc(); })
                   Button('清空')
-                    .height(46).fontSize(14).fontColor('#aaaaaa').backgroundColor('#2a2a2a')
-                    .borderRadius(8).margin({ left: 10 })
+                    .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.clearLiveInput(); })
                   Button('手机推送')
-                    .height(46).fontSize(13).fontColor('#8ecfff').backgroundColor('#28404f')
-                    .borderRadius(8).margin({ left: 10 })
+                    .height(46).fontSize(13).fontColor('#8ED0FF').backgroundColor('#152B33')
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.openPush('live'); })
                 }
                 .width('100%')
                 .justifyContent(FlexAlign.End)
                 .margin({ top: 10 })
 
-                Row() {
+                // 源清单直接跟在「直播列表 N 个」后面：这一行本来就在回答「现在用哪个源、有几个」，
+                // 名字贴着它才对得上；源多时 Flex 自动折到下一行，不会把这句话挤变形。
+                Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
                   Text(this.liveOwn
                     ? '当前：独立直播源「' + (this.liveName.length > 0 ? this.liveName : '未命名')
                       + '」· 直播列表 ' + this.lives.length + ' 个'
                     : '当前：跟随点播源「' + (this.configName.length > 0 ? this.configName : '未命名')
                       + '」· 直播列表 ' + this.lives.length + ' 个')
                     .fontSize(13)
-                    .fontColor('#9aa9b8')
-                    .layoutWeight(1)
+                    .fontColor('#8E8E9A')
+                    .margin({ right: 10, top: 6 })
+
+                  if (this.lives.length > 0) {
+                    ForEach(this.lives, (l: LiveCfg, idx: number) => {
+                      Text(l.name + (LiveSrcProbe.isBad(l.url) ? ' · 空' : ''))
+                        .fontSize(12.5)
+                        .fontColor(LiveSrcProbe.isBad(l.url) ? '#6b6b6b' : '#cccccc')
+                        .backgroundColor(LiveSrcProbe.isBad(l.url) ? '#101116' : '#1A1B22')
+                        .borderRadius(8)
+                        .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+                        .margin({ right: 8, top: 6 })
+                    }, (l: LiveCfg, idx: number) => l.name + String(idx))
+                  }
+
                   if (this.liveOwn) {
                     Text('改回跟随点播源')
                       .fontSize(13)
-                      .fontColor('#9aa9b8')
-                      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                      .backgroundColor('#2f2f2f')
-                      .borderRadius(6)
+                      .fontColor('#8E8E9A')
+                      .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+                      .backgroundColor('#232530')
+                      .borderRadius(9)
+                      .margin({ top: 6 })
                       .focusable(true)
                       .onClick(() => { this.backToVodLive(); })
                   }
                 }
                 .width('100%')
-                .margin({ top: 8 })
-
-                // 直播列表清单归在右侧「直播源」下面，别让它从左侧起头
-                // 直播页探活过的空源在这里标成「· 空」并压暗，解释清楚为什么那边少了几个
-                if (this.lives.length > 0) {
-                  Flex({ wrap: FlexWrap.Wrap }) {
-                    ForEach(this.lives, (l: LiveCfg, idx: number) => {
-                      Text(l.name + (LiveSrcProbe.isBad(l.url) ? ' · 空' : ''))
-                        .fontSize(13)
-                        .fontColor(LiveSrcProbe.isBad(l.url) ? '#6b6b6b' : '#cccccc')
-                        .backgroundColor(LiveSrcProbe.isBad(l.url) ? '#1f1f1f' : '#262626')
-                        .borderRadius(6)
-                        .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                        .margin({ right: 8, top: 8 })
-                    }, (l: LiveCfg, idx: number) => l.name + String(idx))
-                  }
-                  .width('100%')
-                }
+                .margin({ top: 2 })
               }
               .layoutWeight(1)
-              .padding({ left: 14 })
+              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
+              .margin({ left: 8 })
+              .backgroundColor(C_CARD)
+              .borderRadius(20)
+              .border({ width: 1, color: C_LINE })
             }
             .width('100%')
             .alignItems(VerticalAlign.Top)
+            .margin({ top: 14 })
 
             if (this.msg) {
-              Text(this.msg).fontSize(14).fontColor('#9fd8a0').width('100%').margin({ top: 10 })
+              Text(this.msg).fontSize(14).fontColor('#7FD88A').width('100%').margin({ top: 10 })
             }
 
             // ---------- 家长锁 / 豆瓣账号：左右并列，各占半屏 ----------
@@ -869,10 +980,10 @@ struct Settings {
                 this.section('家长锁 · 4 位 PIN')
 
                 Row() {
-                  TextInput({ text: this.pinText, placeholder: '输入 4 位数字 PIN' })
-                    .width(230).height(44).fontSize(15)
-                    .fontColor('#ffffff').placeholderColor('#777777')
-                    .backgroundColor('#242424').borderRadius(8)
+                  TextInput({ text: this.pinText, placeholder: '4 位数字' })
+                    .width(190).height(44).fontSize(15)
+                    .fontColor('#FFFFFF').placeholderColor('#5C5C68')
+                    .backgroundColor('#14151C').borderRadius(12)
                     // 数字键盘 + 圆点掩码：PIN 不明文显示
                     .type(InputType.NUMBER_PASSWORD)
                     .showPasswordIcon(false)
@@ -881,59 +992,63 @@ struct Settings {
                     .maxLength(4)
                     .onChange((v: string) => { this.pinText = v; })
                   Button('设置 / 修改')
-                    .height(44).fontSize(14).fontColor('#ffffff')
-                    .backgroundColor('#FF6B00').borderRadius(8)
+                    .height(44).fontSize(14).fontColor('#FFFFFF')
+                    .backgroundColor('#FF8A3D').borderRadius(12)
                     .margin({ left: 12 })
                     .onClick(() => { this.savePin(); })
                   Button('清除 PIN')
-                    .height(44).fontSize(14).fontColor('#aaaaaa')
-                    .backgroundColor('#2a2a2a').borderRadius(8)
+                    .height(44).fontSize(14).fontColor('#B9B9C4')
+                    .backgroundColor('#232530').borderRadius(12)
                     .margin({ left: 12 })
                     .onClick(() => { this.askClearPin(); })
                   Text(this.pinHas ? '● 已设置' : '○ 未设置')
-                    .fontSize(14).fontColor(this.pinHas ? '#7fc97f' : '#888888')
+                    .fontSize(14).fontColor(this.pinHas ? '#7FD88A' : '#7E7E8A')
                     .margin({ left: 16 })
                 }
                 .width('100%')
 
                 if (this.pinMsg) {
-                  Text(this.pinMsg).fontSize(13).fontColor('#9fd8a0').width('100%').margin({ top: 6 })
+                  Text(this.pinMsg).fontSize(13).fontColor('#7FD88A').width('100%').margin({ top: 6 })
                 }
               }
               .layoutWeight(1)
-              .padding({ right: 14 })
+              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
+              .margin({ right: 8 })
+              .backgroundColor(C_CARD)
+              .borderRadius(20)
+              .border({ width: 1, color: C_LINE })
 
               // ---------- 右：豆瓣账号（可选） ----------
               Column() {
                 this.section('豆瓣账号（可选）· 提高抓取配额')
 
-                TextInput({ text: this.doubanText, placeholder: '粘贴登录后的 Cookie（含 dbcl2=...）' })
+                TextInput({ text: this.doubanText, placeholder: '粘贴 Cookie（含 dbcl2=…）' })
                   .width('100%').height(46).fontSize(14)
-                  .fontColor('#ffffff').placeholderColor('#777777')
-                  .backgroundColor('#242424').borderRadius(8)
+                  .fontColor('#FFFFFF').placeholderColor('#5C5C68')
+                  .backgroundColor('#14151C').borderRadius(12)
                   .onChange((v: string) => { this.doubanText = v; })
 
                 Row() {
                   Button('粘贴')
-                    .height(42).fontSize(14).fontColor('#ffffff').backgroundColor('#3a3a3a')
-                    .borderRadius(8)
+                    .height(42).fontSize(14).fontColor('#FFFFFF').backgroundColor('#232530')
+                    .borderRadius(12)
                     .onClick(() => { this.pasteCookie(); })
                   Button('手机推送')
-                    .height(42).fontSize(13).fontColor('#8ecfff').backgroundColor('#28404f')
-                    .borderRadius(8).margin({ left: 10 })
+                    .height(42).fontSize(13).fontColor('#8ED0FF').backgroundColor('#152B33')
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.openPush('cookie'); })
                   Button(this.doubanBusy ? '验证中…' : '保存并验证')
-                    .height(42).fontSize(14).fontColor('#ffffff').backgroundColor('#FF6B00')
-                    .borderRadius(8).margin({ left: 10 })
+                    .height(42).fontSize(14).fontColor('#FFFFFF').backgroundColor('#FF8A3D')
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.saveCookie(); })
                   if (this.doubanHas) {
                     Button('退出登录')
-                      .height(42).fontSize(14).fontColor('#aaaaaa').backgroundColor('#2a2a2a')
-                      .borderRadius(8).margin({ left: 10 })
+                      .height(42).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
+                      .borderRadius(12).margin({ left: 10 })
                       .onClick(() => { this.clearCookie(); })
                   }
                   Text('● ' + (this.doubanHas ? this.doubanInfo : '未登录'))
-                    .fontSize(14).fontColor(this.doubanHas ? '#7fc97f' : '#888888')
+                    .fontSize(14).fontColor(this.doubanHas ? '#7FD88A' : '#7E7E8A')
                     .margin({ left: 16 })
                     .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
                     .layoutWeight(1)
@@ -943,14 +1058,19 @@ struct Settings {
                 .margin({ top: 10 })
 
                 if (this.doubanMsg) {
-                  Text(this.doubanMsg).fontSize(13).fontColor('#9fd8a0').width('100%').margin({ top: 6 })
+                  Text(this.doubanMsg).fontSize(13).fontColor('#7FD88A').width('100%').margin({ top: 6 })
                 }
               }
               .layoutWeight(1)
-              .padding({ left: 14 })
+              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
+              .margin({ left: 8 })
+              .backgroundColor(C_CARD)
+              .borderRadius(20)
+              .border({ width: 1, color: C_LINE })
             }
             .width('100%')
             .alignItems(VerticalAlign.Top)
+            .margin({ top: 14 })
 
             // ---------- 已保存的接口 / 资源站：左右并列 ----------
             Row() {
@@ -966,25 +1086,25 @@ struct Settings {
                           Text(a.name)
                             .fontSize(16)
                             .fontWeight(FontWeight.Medium)
-                            .fontColor(a.url === this.vodAddr ? '#FF6B00' : '#eeeeee')
+                            .fontColor(a.url === this.vodAddr ? '#FF8A3D' : '#E4E4EC')
                             .maxLines(1)
                             .textOverflow({ overflow: TextOverflow.Ellipsis })
                             .constraintSize({ maxWidth: 260 })
                           if (a.url === this.vodAddr) {
                             Text('点播中')
-                              .fontSize(11).fontColor('#FF6B00').backgroundColor('#332613')
-                              .borderRadius(8).padding({ left: 8, right: 8, top: 2, bottom: 2 })
+                              .fontSize(11).fontColor('#FF8A3D').backgroundColor('#2A1B0C')
+                              .borderRadius(12).padding({ left: 8, right: 8, top: 2, bottom: 2 })
                               .margin({ left: 8 })
                           }
                           if (this.liveOwn && a.url === this.liveAddr) {
                             Text('直播中')
-                              .fontSize(11).fontColor('#7fc97f').backgroundColor('#1f3320')
-                              .borderRadius(8).padding({ left: 8, right: 8, top: 2, bottom: 2 })
+                              .fontSize(11).fontColor('#7FD88A').backgroundColor('#12210F')
+                              .borderRadius(12).padding({ left: 8, right: 8, top: 2, bottom: 2 })
                               .margin({ left: 6 })
                           }
                         }
                         Text(BuiltinConfig.isBuiltin(a.url) ? BuiltinConfig.DESC : a.url)
-                          .fontSize(11).fontColor('#777777').width('100%')
+                          .fontSize(11).fontColor('#5C5C68').width('100%')
                           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
                           .margin({ top: 4 })
                       }
@@ -994,35 +1114,35 @@ struct Settings {
                       Text('载入点播')
                         .fontSize(13).fontColor('#FFB077')
                         .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-                        .backgroundColor('#332613').borderRadius(6).margin({ left: 10 })
+                        .backgroundColor('#2A1B0C').borderRadius(9).margin({ left: 10 })
                         .focusable(true)
                         .onClick(() => { this.useSavedAsVod(a); })
                       Text('设为直播')
-                        .fontSize(13).fontColor('#9fd8a0')
+                        .fontSize(13).fontColor('#7FD88A')
                         .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-                        .backgroundColor('#1f3320').borderRadius(6).margin({ left: 8 })
+                        .backgroundColor('#12210F').borderRadius(9).margin({ left: 8 })
                         .focusable(true)
                         .onClick(() => { this.useSavedAsLive(a); })
                       // 内置配置改不了名、也删不掉（它不在磁盘地址簿里，删了会立刻回来）
                       if (!BuiltinConfig.isBuiltin(a.url)) {
                         Text('改名')
-                          .fontSize(13).fontColor('#9aa9b8')
+                          .fontSize(13).fontColor('#8E8E9A')
                           .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-                          .backgroundColor('#2f2f2f').borderRadius(6).margin({ left: 8 })
+                          .backgroundColor('#232530').borderRadius(9).margin({ left: 8 })
                           .focusable(true)
                           .onClick(() => { this.openRename(a); })
                         Text('删除')
-                          .fontSize(13).fontColor('#ff8888')
+                          .fontSize(13).fontColor('#FF9A9A')
                           .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-                          .backgroundColor('#2f2f2f').borderRadius(6).margin({ left: 6 })
+                          .backgroundColor('#232530').borderRadius(9).margin({ left: 6 })
                           .focusable(true)
                           .onClick(() => { this.delSaved(a); })
                       }
                     }
                     .width('100%')
                     .padding({ left: 16, right: 12, top: 12, bottom: 12 })
-                    .backgroundColor(a.url === this.vodAddr ? '#2a2113' : '#242424')
-                    .borderRadius(8)
+                    .backgroundColor(a.url === this.vodAddr ? '#241A0D' : '#14151C')
+                    .borderRadius(12)
                     .margin({ bottom: 8 })
                   }, (a: SavedApi, idx: number) => idx + '|' + a.url + '|' + a.name)
                 }
@@ -1031,38 +1151,38 @@ struct Settings {
                 if (this.rows.length > 0) {
                   Row() {
                     Text('多仓仓库（共 ' + this.rows.length + ' 个 · 载入后作用在点播源）')
-                      .fontSize(16).fontColor('#FF6B00').fontWeight(FontWeight.Bold)
+                      .fontSize(16).fontColor('#FF8A3D').fontWeight(FontWeight.Bold)
                       .layoutWeight(1)
                       .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
                     Button(this.scanning ? '扫描中…' : '扫描全部')
                       .height(36).fontSize(14)
-                      .backgroundColor(this.scanning ? '#3a3a3a' : '#FF6B00')
-                      .fontColor('#ffffff')
+                      .backgroundColor(this.scanning ? '#232530' : '#FF8A3D')
+                      .fontColor('#FFFFFF')
                       .onClick(() => { this.scanAll(); })
                   }
                   .width('100%')
                   .margin({ top: 20, bottom: 10 })
 
                   if (this.scanTip) {
-                    Text(this.scanTip).fontSize(13).fontColor('#9aa9b8').width('100%').margin({ bottom: 10 })
+                    Text(this.scanTip).fontSize(13).fontColor('#8E8E9A').width('100%').margin({ bottom: 10 })
                   }
 
                   ForEach(this.rows, (r: RepoScanResult) => {
                     Row() {
-                      Text(r.name).fontSize(15).fontColor('#dddddd').layoutWeight(1).maxLines(1)
+                      Text(r.name).fontSize(15).fontColor('#E4E4EC').layoutWeight(1).maxLines(1)
                         .textOverflow({ overflow: TextOverflow.Ellipsis })
                       Text(r.msg)
                         .fontSize(12)
-                        .fontColor(r.ok ? '#7fc97f' : (r.msg === '未扫描' ? '#888888' : '#ff9a9a'))
+                        .fontColor(r.ok ? '#7FD88A' : (r.msg === '未扫描' ? '#7E7E8A' : '#FF9A9A'))
                         .margin({ right: 12 })
                         .maxLines(1)
                         .textOverflow({ overflow: TextOverflow.Ellipsis })
-                      Text(this.busy === 'vod' ? '…' : '加载').fontSize(14).fontColor('#FF6B00')
+                      Text(this.busy === 'vod' ? '…' : '加载').fontSize(14).fontColor('#FF8A3D')
                     }
                     .width('100%')
                     .padding({ left: 16, right: 16, top: 14, bottom: 14 })
-                    .backgroundColor(r.ok ? '#20301f' : '#242424')
-                    .borderRadius(8)
+                    .backgroundColor(r.ok ? '#12200F' : '#14151C')
+                    .borderRadius(12)
                     .margin({ bottom: 8 })
                     .focusable(true)
                     .onClick(() => { this.useRepoUrl(r.name, r.url); })
@@ -1070,7 +1190,11 @@ struct Settings {
                 }
               }
               .layoutWeight(1)
-              .padding({ right: 14 })
+              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
+              .margin({ right: 8 })
+              .backgroundColor(C_CARD)
+              .borderRadius(20)
+              .border({ width: 1, color: C_LINE })
               .alignItems(HorizontalAlign.Start)
 
               // ---------- 右：资源站（只列可用） ----------
@@ -1083,24 +1207,24 @@ struct Settings {
                       // stopPropagation，嵌套的话点删除会连带触发整行的切换
                       Row() {
                         Text(s.name).fontSize(15)
-                          .fontColor(s.key === this.curKey ? '#FF6B00' : '#dddddd')
+                          .fontColor(s.key === this.curKey ? '#FF8A3D' : '#E4E4EC')
                           .layoutWeight(1).maxLines(1)
                           .textOverflow({ overflow: TextOverflow.Ellipsis })
-                        Text('type ' + s.type).fontSize(12).fontColor('#777777').margin({ right: 8 })
+                        Text('type ' + s.type).fontSize(12).fontColor('#5C5C68').margin({ right: 8 })
                         Text(s.key === this.curKey ? '当前' : '切换')
                           .fontSize(12)
-                          .fontColor(s.key === this.curKey ? '#FF6B00' : '#7fc97f')
+                          .fontColor(s.key === this.curKey ? '#FF8A3D' : '#7FD88A')
                       }
                       .layoutWeight(1)
                       .focusable(true)
                       .onClick(() => { this.useSite(s); })
 
-                      // 只有用户自己收进 Default 的站点能删
+                      // 只有用户自己收进 Default 的站点能删；预设的暴风资源没有这个按钮
                       if (this.canRemoveSite(s)) {
                         Text('删除')
-                          .fontSize(12).fontColor('#ff8888')
+                          .fontSize(12).fontColor('#FF9A9A')
                           .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-                          .backgroundColor('#3a2424').borderRadius(6)
+                          .backgroundColor('#2A1719').borderRadius(9)
                           .margin({ left: 8 })
                           .focusable(true)
                           .onClick(() => { this.delMySite(s); })
@@ -1108,35 +1232,43 @@ struct Settings {
                     }
                     .width('100%')
                     .padding({ left: 16, right: 16, top: 13, bottom: 13 })
-                    .backgroundColor(s.key === this.curKey ? '#2a2113' : '#202020')
-                    .borderRadius(8)
+                    .backgroundColor(s.key === this.curKey ? '#241A0D' : '#14151C')
+                    .borderRadius(12)
                     .margin({ bottom: 8 })
                   }, (s: SiteCfg, idx: number) => idx + '|' + s.key)
                 } else {
                   Text('这份配置里没有可用的采集站，换一个接口，'
                     + '或到「直播源」单独挂一份能用的直播地址。')
-                    .fontSize(13).fontColor('#c9a227').width('100%').margin({ top: 8 })
+                    .fontSize(13).fontColor('#E0B341').width('100%').margin({ top: 8 })
                 }
 
                 // 界面上只留一条操作提示；技术原因（spider 运行时）写在代码注释和对话里
                 Text('点播源和直播源各存一份，互不影响：某个接口只有直播能用时，点「设为直播」即可。')
-                  .fontSize(13).fontColor('#888888').width('100%').margin({ top: 18 })
+                  .fontSize(13).fontColor('#7E7E8A').width('100%').margin({ top: 18 })
               }
               .layoutWeight(1)
-              .padding({ left: 14 })
+              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
+              .margin({ left: 8 })
+              .backgroundColor(C_CARD)
+              .borderRadius(20)
+              .border({ width: 1, color: C_LINE })
               .alignItems(HorizontalAlign.Start)
             }
             .width('100%')
             .alignItems(VerticalAlign.Top)
+            .margin({ top: 14 })
 
           }
           .width('100%')
-          .padding({ left: 28, right: 28, bottom: 30 })
+          .padding({ left: 44, right: 36, bottom: 34 })
         }
         .layoutWeight(1)
         .width('100%')
         .align(Alignment.Top)
         .scrollBar(BarState.Off)
+        }
+        .layoutWeight(1)
+        .height('100%')
       }
       .width('100%')
       .height('100%')
@@ -1145,11 +1277,11 @@ struct Settings {
       if (this.pinClearOpen) {
         Column() {
           Column() {
-            Text('输入 PIN 以清除').fontSize(20).fontColor('#ffffff').fontWeight(FontWeight.Bold)
+            Text('输入 PIN 以清除').fontSize(20).fontColor('#FFFFFF').fontWeight(FontWeight.Bold)
             TextInput({ text: this.pinClearInput, placeholder: '4 位数字' })
               .width('100%').height(48).fontSize(18)
-              .fontColor('#ffffff').placeholderColor('#777777')
-              .backgroundColor('#2a2a2a').borderRadius(8)
+              .fontColor('#FFFFFF').placeholderColor('#5C5C68')
+              .backgroundColor('#232530').borderRadius(12)
               .type(InputType.NUMBER_PASSWORD)
               .showPasswordIcon(false)
               .enableAutoFill(false)
@@ -1159,14 +1291,14 @@ struct Settings {
               .defaultFocus(true)
               .onChange((v: string) => { this.pinClearInput = v; })
             if (this.pinClearErr.length > 0) {
-              Text(this.pinClearErr).fontSize(13).fontColor('#ff9999').width('100%').margin({ top: 8 })
+              Text(this.pinClearErr).fontSize(13).fontColor('#FF9A9A').width('100%').margin({ top: 8 })
             }
             Row() {
               Button('取消')
-                .fontSize(14).height(40).backgroundColor('#3a3a3a').fontColor('#ffffff')
+                .fontSize(14).height(40).backgroundColor('#232530').fontColor('#FFFFFF')
                 .onClick(() => { this.pinClearOpen = false; })
               Button('确认清除')
-                .fontSize(14).height(40).backgroundColor('#FF6B00').fontColor('#ffffff')
+                .fontSize(14).height(40).backgroundColor('#FF8A3D').fontColor('#FFFFFF')
                 .margin({ left: 12 })
                 .onClick(() => { this.doClearPin(); })
             }
@@ -1175,13 +1307,13 @@ struct Settings {
             .margin({ top: 16 })
           }
           .width(400)
-          .backgroundColor('#222222')
-          .borderRadius(14)
+          .backgroundColor('#12131A')
+          .borderRadius(20)
           .padding(24)
         }
         .width('100%')
         .height('100%')
-        .backgroundColor('#000000aa')
+        .backgroundColor('#B3000000')
         .justifyContent(FlexAlign.Center)
       }
 
@@ -1189,27 +1321,27 @@ struct Settings {
       if (this.renameOpen) {
         Column() {
           Column() {
-            Text('给接口改名').fontSize(20).fontColor('#ffffff').fontWeight(FontWeight.Bold)
+            Text('给接口改名').fontSize(20).fontColor('#FFFFFF').fontWeight(FontWeight.Bold)
             Text(this.renameUrl)
-              .fontSize(11).fontColor('#777777').width('100%').margin({ top: 6 })
+              .fontSize(11).fontColor('#5C5C68').width('100%').margin({ top: 6 })
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             TextInput({ text: this.renameText, placeholder: this.renamePlaceholder })
               .width('100%')
               .height(48)
               .fontSize(15)
-              .fontColor('#ffffff')
-              .placeholderColor('#777777')
-              .backgroundColor('#2a2a2a')
-              .borderRadius(8)
+              .fontColor('#FFFFFF')
+              .placeholderColor('#5C5C68')
+              .backgroundColor('#232530')
+              .borderRadius(12)
               .margin({ top: 16 })
               .defaultFocus(true)
               .onChange((v: string) => { this.renameText = v; })
             Row() {
               Button('取消')
-                .fontSize(14).height(40).backgroundColor('#3a3a3a').fontColor('#ffffff')
+                .fontSize(14).height(40).backgroundColor('#232530').fontColor('#FFFFFF')
                 .onClick(() => { this.renameOpen = false; })
               Button('保存')
-                .fontSize(14).height(40).backgroundColor('#FF6B00').fontColor('#ffffff')
+                .fontSize(14).height(40).backgroundColor('#FF8A3D').fontColor('#FFFFFF')
                 .margin({ left: 12 })
                 .onClick(() => { this.doRename(); })
             }
@@ -1218,13 +1350,13 @@ struct Settings {
             .margin({ top: 16 })
           }
           .width('46%')
-          .backgroundColor('#222222')
-          .borderRadius(14)
+          .backgroundColor('#12131A')
+          .borderRadius(20)
           .padding(24)
         }
         .width('100%')
         .height('100%')
-        .backgroundColor('#000000aa')
+        .backgroundColor('#B3000000')
         .justifyContent(FlexAlign.Center)
       }
 
@@ -1234,14 +1366,14 @@ struct Settings {
           Column() {
             Text(this.pushTarget === 'live' ? '手机推送 · 直播源'
               : (this.pushTarget === 'cookie' ? '手机推送 · 豆瓣 Cookie' : '手机推送 · 点播源'))
-              .fontSize(19).fontColor('#ffffff').fontWeight(FontWeight.Bold)
+              .fontSize(19).fontColor('#FFFFFF').fontWeight(FontWeight.Bold)
 
             if (this.pushErr.length > 0) {
-              Text(this.pushErr).fontSize(14).fontColor('#ff9999')
+              Text(this.pushErr).fontSize(14).fontColor('#FF9A9A')
                 .width('100%').margin({ top: 14 })
             } else if (this.pushUrl.length === 0) {
               Row() {
-                LoadingProgress().width(26).height(26).color('#FF6B00')
+                LoadingProgress().width(26).height(26).color('#FF8A3D')
                 Text('正在启动本地服务…').fontSize(14).fontColor('#999999').margin({ left: 10 })
               }
               .margin({ top: 18 })
@@ -1249,7 +1381,7 @@ struct Settings {
               Text(this.pushTarget === 'cookie'
                 ? '手机连同一个 Wi-Fi → 扫码 → 粘贴 Cookie → 点推送'
                 : '手机连同一个 Wi-Fi → 扫码 → 粘贴地址 → 点推送')
-                .fontSize(13).fontColor('#9aa9b8').margin({ top: 8 })
+                .fontSize(13).fontColor('#8E8E9A').margin({ top: 8 })
               QrView({ content: this.pushUrl, box: 240 })
                 .margin({ top: 12 })
               Text(this.pushMsg.length > 0
@@ -1260,30 +1392,30 @@ struct Settings {
                 .margin({ top: 12 })
               if (this.pushDiag.length > 0) {
                 Text(this.pushDiag)
-                  .fontSize(11).fontColor('#888888').margin({ top: 6 })
+                  .fontSize(11).fontColor('#7E7E8A').margin({ top: 6 })
                   .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
               }
             }
 
             Button('关闭')
-              .fontSize(14).height(38).backgroundColor('#3a3a3a').fontColor('#ffffff')
+              .fontSize(14).height(38).backgroundColor('#232530').fontColor('#FFFFFF')
               .margin({ top: 16 })
               .onClick(() => { this.closePush(); })
           }
           .width(360)
-          .backgroundColor('#222222')
-          .borderRadius(14)
+          .backgroundColor('#12131A')
+          .borderRadius(20)
           .padding(20)
           .alignItems(HorizontalAlign.Center)
         }
         .width('100%')
         .height('100%')
-        .backgroundColor('#000000aa')
+        .backgroundColor('#B3000000')
         .justifyContent(FlexAlign.Center)
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#161616')
+    .backgroundColor('#08090B')
   }
 }

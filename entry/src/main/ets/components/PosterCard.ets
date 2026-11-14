@@ -5,7 +5,7 @@ import { PosterStore } from '../utils/PosterStore';
 
 /**
  * TV 海报卡片：可被遥控器焦点选中的影片卡片。
- * 获得焦点时放大 + 橙色描边，遥控器 OK 键触发 onSelect（跳详情）。
+ * 获得焦点时放大 + 描边，遥控器 OK 键触发 onSelect（跳详情）。
  *
  * 图像分层叠放，从下到上：
  *   0 占位框（灰底 + 片名首字 + "暂无海报"）—— 永远在，兜住所有失败情况
@@ -16,11 +16,17 @@ import { PosterStore } from '../utils/PosterStore';
  *
  * 刮削图只有 onComplete 之后才淡入，所以从占位 → 站点图 → 刮削图
  * 的替换过程不会有空白闪烁。
+ *
+ * 两套视觉：
+ *   modern=false（默认，搜索页在用）旧深灰 + 亮橙描边
+ *   modern=true（点播海报墙）暗底 + 琥珀，卡宽卡高由外部传，焦点用白色内描边 + 暖色外发光
+ *   灵犀遥控器是鼠标，modern 版额外接 onHover，鼠标移上去就点亮。
  */
 @Component
 export struct PosterCard {
   @Prop @Watch('onItemChange') item: VodItem = { vod_id: '', vod_name: '', vod_pic: '' };
   @State isFocused: boolean = false;
+  @State isHover: boolean = false;
   @State picUri: string = '';
   @State picOk: boolean = false;
   /** 刮削到的本地海报（file:// 路径），空表示还没刮到 */
@@ -30,8 +36,12 @@ export struct PosterCard {
   @StorageProp('ratingTick') ratingTick: number = 0;
   /** 海报刮削信号：PosterStore 存好一张图就 +1 */
   @StorageProp('posterTick') @Watch('onPosterTick') posterTick: number = 0;
-  /** 海报区高度：6 列布局下卡宽约 139，200 高约等于 1:1.44，接近常规海报比例 */
-  private readonly posterH: number = 200;
+  /** 新版视觉 + 外部指定尺寸 */
+  @Prop modern: boolean = false;
+  /** 卡片宽度；0 表示铺满父容器（旧行为） */
+  @Prop cardW: number = 0;
+  /** 海报高度 */
+  @Prop cardH: number = 200;
   onSelect: () => void = () => {};
 
   aboutToAppear(): void {
@@ -98,27 +108,41 @@ export struct PosterCard {
     return RatingStore.label(this.item);
   }
 
+  /** 卡片目标宽度：0 走父容器的 100% */
+  private w(): Length {
+    return this.cardW > 0 ? this.cardW : '100%';
+  }
+
+  /** 焦点或鼠标悬停都算亮起 */
+  private lit(): boolean {
+    return this.isFocused || (this.modern && this.isHover);
+  }
+
+  private radius(): number {
+    return this.modern ? 13 : 8;
+  }
+
   build() {
     Column() {
       Stack() {
         // ---- 第 0 层：占位框，永久存在 ----
         Column() {
           Text(this.initial())
-            .fontSize(26)
+            .fontSize(this.modern ? 30 : 26)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#4d4d4d')
+            .fontColor(this.modern ? '#3A3B45' : '#4d4d4d')
           Text('暂无海报')
             .fontSize(10)
-            .fontColor('#5a5a5a')
+            .fontColor(this.modern ? '#43444F' : '#5a5a5a')
             .margin({ top: 5 })
         }
         .width('100%')
-        .height(this.posterH)
+        .height(this.cardH)
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor('#232323')
-        .borderRadius(8)
-        .border({ width: 1, color: '#3a3a3a' })
+        .backgroundColor(this.modern ? '#1A1B22' : '#232323')
+        .borderRadius(this.radius())
+        .border({ width: 1, color: this.modern ? '#14FFFFFF' : '#3a3a3a' })
         .zIndex(0)
 
         // ---- 第 1 层：站点自带的图 ----
@@ -128,9 +152,9 @@ export struct PosterCard {
         if (this.picUri.length > 0) {
           Image(this.picUri)
             .width('100%')
-            .height(this.posterH)
+            .height(this.cardH)
             .objectFit(ImageFit.Cover)
-            .borderRadius(8)
+            .borderRadius(this.radius())
             .zIndex(1)
             .onComplete(() => {
               this.picOk = true;
@@ -145,9 +169,9 @@ export struct PosterCard {
         if (this.scrapedUri.length > 0) {
           Image(this.scrapedUri)
             .width('100%')
-            .height(this.posterH)
+            .height(this.cardH)
             .objectFit(ImageFit.Cover)
-            .borderRadius(8)
+            .borderRadius(this.radius())
             .zIndex(2)
             .onComplete(() => {
               this.scrapedOk = true;
@@ -160,19 +184,32 @@ export struct PosterCard {
             })
         }
 
-        // ---- 第 3 层：左上角年份 ----
+        // ---- 第 3 层：底部压暗，让角标和文字有底 ----
+        if (this.modern) {
+          Column()
+            .width('100%')
+            .height(72)
+            .linearGradient({
+              angle: 180,
+              colors: [['#00000000', 0.0], ['#A6000000', 1.0]]
+            })
+            .zIndex(5)
+            .hitTestBehavior(HitTestMode.None)
+        }
+
+        // ---- 第 4 层：左上角年份 ----
         if (this.yearText().length > 0) {
           Column() {
             Text(this.yearText())
-              .fontSize(18)
+              .fontSize(this.modern ? 14 : 18)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#f2f2f2')
+              .fontColor(this.modern ? '#E4E4EC' : '#f2f2f2')
               .backgroundColor('#CC000000')
               .borderRadius(6)
-              .padding({ left: 8, right: 8, top: 2, bottom: 3 })
+              .padding({ left: this.modern ? 6 : 8, right: this.modern ? 6 : 8, top: 2, bottom: 3 })
           }
           .width('100%')
-          .height(this.posterH)
+          .height(this.cardH)
           .justifyContent(FlexAlign.Start)
           .alignItems(HorizontalAlign.Start)
           .padding({ left: 8, top: 8 })
@@ -180,19 +217,22 @@ export struct PosterCard {
           .hitTestBehavior(HitTestMode.None)
         }
 
-        // ---- 第 4 层：右下角评分，永远最上 ----
+        // ---- 第 5 层：右下角评分，永远最上 ----
         if (this.scoreText().length > 0) {
           Column() {
-            Text('★ ' + this.scoreText())
-              .fontSize(22)
+            Text((this.modern ? '★ ' : '★ ') + this.scoreText())
+              .fontSize(this.modern ? 15 : 22)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#FFD24A')
-              .backgroundColor('#CC000000')
+              .fontColor(this.modern ? '#FFD08A' : '#FFD24A')
+              .backgroundColor('#B3000000')
               .borderRadius(6)
-              .padding({ left: 9, right: 9, top: 2, bottom: 3 })
+              .padding({
+                left: this.modern ? 7 : 9, right: this.modern ? 7 : 9,
+                top: 2, bottom: 3
+              })
           }
           .width('100%')
-          .height(this.posterH)
+          .height(this.cardH)
           .justifyContent(FlexAlign.End)
           .alignItems(HorizontalAlign.End)
           .padding({ right: 8, bottom: 8 })
@@ -200,34 +240,44 @@ export struct PosterCard {
           .hitTestBehavior(HitTestMode.None)   // 别挡住卡片的点击与焦点
         }
       }
-      .width('100%')
-      .height(this.posterH)
+      .width(this.w())
+      .height(this.cardH)
 
       Text(this.item.vod_name)
-        .fontSize(13)
-        .fontColor('#eeeeee')
+        .fontSize(this.modern ? 13.5 : 13)
+        .fontColor(this.modern ? '#E4E4EC' : '#eeeeee')
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width('100%')
-        .margin({ top: 6 })
+        .width(this.w())
+        .margin({ top: this.modern ? 9 : 6 })
       if (this.item.vod_remarks) {
         Text(this.item.vod_remarks)
-          .fontSize(11)
-          .fontColor('#FF6B00')
+          .fontSize(this.modern ? 11 : 11)
+          .fontColor(this.modern ? '#8E8E9A' : '#FF6B00')
           .maxLines(1)
-          .width('100%')
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width(this.w())
+          .margin({ top: this.modern ? 3 : 0 })
       }
     }
-    .borderRadius(10)
+    .width(this.w())
+    .borderRadius(this.modern ? 13 : 10)
     .border({
-      width: this.isFocused ? 3 : 0,
-      color: this.isFocused ? '#FF6B00' : Color.Transparent
+      width: this.isFocused ? (this.modern ? 2 : 3) : 0,
+      color: this.isFocused ? (this.modern ? '#FFD9BC' : '#FF6B00') : Color.Transparent
     })
-    .scale({ x: this.isFocused ? 1.08 : 1, y: this.isFocused ? 1.08 : 1 })
-    .animation({ duration: 150 })
+    .shadow(this.modern && this.lit()
+      ? { radius: 26, color: '#59FF8A3D', offsetX: 0, offsetY: 0 }
+      : { radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
+    .scale({
+      x: this.lit() ? (this.modern ? 1.05 : 1.08) : 1,
+      y: this.lit() ? (this.modern ? 1.05 : 1.08) : 1
+    })
+    .animation({ duration: this.modern ? 130 : 150 })
     .focusable(true)
     .onFocus(() => { this.isFocused = true; })
     .onBlur(() => { this.isFocused = false; })
+    .onHover((isHover: boolean) => { this.isHover = isHover; })
     .onClick(() => this.onSelect())
   }
 }

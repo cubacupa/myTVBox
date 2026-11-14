@@ -9,12 +9,12 @@ import { FilterUtil, FilterGroup, FilterValue, FilterSel } from '../utils/Filter
 import { SiteCfg } from '../model/TvBoxModels';
 import { VodItem, VodClass } from '../model/VodItem';
 import { PosterCard } from '../components/PosterCard';
+import { SideNav } from '../components/SideNav';
 import { RatingStore } from '../utils/RatingStore';
 import { PosterStore } from '../utils/PosterStore';
 import { HttpUtil } from '../utils/HttpUtil';
 import { PinStore } from '../utils/PinStore';
 import { DoubanAuth } from '../utils/DoubanAuth';
-import { TopBar } from '../components/TopBar';
 
 /**
  * 点播首页（TVBox 形态）：
@@ -82,6 +82,12 @@ interface SortRef {
   i: number;
 }
 
+/** 从首页「查看全部」进来时带的参数 */
+interface LibParams {
+  typeId?: string;
+  typeName?: string;
+}
+
 @Entry
 @Component
 struct Index {
@@ -91,8 +97,12 @@ struct Index {
   @State curTop: string = '';        // 当前一级分类 id
   @State items: VodItem[] = [];
   @State curClass: string = '';
+  /** 从首页「查看全部」带过来的分类 id：进页面后直接落到这一栏 */
+  private wantTypeId: string = '';
   @State page: number = 1;
   @State pageCount: number = 1;
+  /** 当前分类的真实总数（接口 total）。0 = 站点没给，界面就不显示数量 */
+  @State totalCount: number = 0;
   @State loading: boolean = false;
   @State err: string = '';
   @State needConfig: boolean = false;
@@ -111,6 +121,9 @@ struct Index {
   /** 每次收集/移出自增，用来强制站点浮层的 ForEach 重建（key 里带上） */
   @State myRev: number = 0;
   @State toast: string = '';
+  /** 灵犀遥控器按鼠标上报：hover 与 focus 都要能点亮 */
+  @State hoverId: string = '';
+  @State focusId: string = '';
   /** 分类切换后如果接口返回的还是同一批片，用这行字说明是站点的问题，免得用户反复白点 */
   @State classNote: string = '';
 
@@ -182,7 +195,16 @@ struct Index {
     if (s === null) {
       return '';
     }
-    return this.inMySites(s.api) ? '✓ 已在 Default' : '＋ 收进 Default';
+    return this.inMySites(s.api) ? '已在 Default' : '收进 Default';
+  }
+
+  /** 顶栏「收进 Default」按钮的图标：已收用对勾，未收用加号 */
+  private collectIcon(): Resource {
+    const s: SiteCfg | null = AppState.currentSite;
+    if (s !== null && this.inMySites(s.api)) {
+      return $r('sys.symbol.checkmark_circle');
+    }
+    return $r('sys.symbol.plus_circle');
   }
 
   private mySiteLabel(s: SiteCfg): string {
@@ -249,10 +271,8 @@ struct Index {
 
   /** 输对 PIN 后开一个 30 分钟的解锁窗口；不落盘 */
   private confirmPin(): void {
-    const ctx = getContext(this) as common.Context;
-    const res: string = PinStore.verify(ctx, this.pinInput);
-    if (res.length > 0) {
-      this.pinErr = res;
+    if (this.pinInput.trim() !== this.pin) {
+      this.pinErr = 'PIN 不对，再试一次';
       return;
     }
     this.unlocked = true;
@@ -299,6 +319,11 @@ struct Index {
   }
 
   aboutToAppear(): void {
+    // 从首页分类行的「查看全部 / 全部 XX」进来时，落到指定分类
+    const lp = router.getParams() as LibParams;
+    if (lp !== undefined && lp !== null && lp.typeId !== undefined) {
+      this.wantTypeId = lp.typeId;
+    }
     const saved: string | undefined = AppStorage.get<string>(SORT_KEY);
     if (saved === SORT_SCORE || saved === SORT_NEW) {
       this.sortMode = saved;
@@ -355,7 +380,7 @@ struct Index {
     HttpUtil.init(ctx);
     // 豆瓣登录 Cookie（可选）：必须在第一次豆瓣请求前读回来，否则等于没登录
     DoubanAuth.init(ctx);
-    this.pin = PinStore.get(ctx);   // 家长锁：读 PIN 指纹（空串 = 没设置，拿不到原文）
+    this.pin = PinStore.get(ctx);   // 家长锁：读 4 位 PIN（没设置就是空串）
     this.unlocked = PinStore.isVodUnlocked();   // 冷启动一定是 false；热启动要查有没有过期
     RatingStore.init(ctx);
     PosterStore.init(ctx);
@@ -397,7 +422,7 @@ struct Index {
     try {
       // type_id / type_pid 有的站给数字、有的给字符串。先在这里统一成字符串，
       // 否则界面里 `c.type_id === curClass` 会退化成 number 与 string 比较，
-      // 一级点过一次以后二级高亮就永远不亮（不同站点的分类树都会踩这个坑）。
+      // 一级点过一次以后二级高亮就永远不亮（暴风影音、淘片都踩过这个坑）。
       const rawCls: VodClass[] = await SiteApi.getClasses(site);
       // 快速连切站点时，旧站点的分类可能晚到：已被更新的加载取代就直接丢弃
       if (seq !== this.loadSeq) {
@@ -416,12 +441,30 @@ struct Index {
       this.classes = normCls;
       this.buildClassTree();
       const firstTop: VodClass | null = this.tops.length > 0 ? this.tops[0] : null;
-      this.curTop = firstTop === null ? '' : this.pidKey(firstTop.type_id);
-      this.applySubs(firstTop === null ? [] : this.childrenOf(this.curTop));
+      // 「查看全部」带过来的分类优先：可能是一级（电影），也可能是二级（动作片）
+      let useTop: VodClass | null = firstTop;
+      let useClass: string = '';
+      const wanted: VodClass | null = this.classOf(this.wantTypeId);
+      if (wanted !== null) {
+        const wpid: string = wanted.type_pid === undefined ? '' : wanted.type_pid.toString();
+        if (wpid === '' || wpid === '0') {
+          useTop = wanted;
+          const kids: VodClass[] = this.childrenOf(this.pidKey(wanted.type_id));
+          useClass = kids.length > 0 ? kids[0].type_id : this.pidKey(wanted.type_id);
+        } else {
+          const parent: VodClass | null = this.classOf(wpid);
+          useTop = parent === null ? firstTop : parent;
+          useClass = this.pidKey(wanted.type_id);
+        }
+        this.wantTypeId = '';
+      }
+      this.curTop = useTop === null ? '' : this.pidKey(useTop.type_id);
+      this.applySubs(useTop === null ? [] : this.childrenOf(this.curTop));
       // 落到第一个子分类而不是一级本身：苹果CMS 的一级（电影片/连续剧）
       // 只装着没归到子类的少数片，所以直接进一级经常只有一两部
-      this.curClass = this.subs.length > 0 ? this.subs[0].type_id
-        : (firstTop === null ? '' : firstTop.type_id);
+      this.curClass = useClass.length > 0 ? useClass
+        : (this.subs.length > 0 ? this.subs[0].type_id
+          : (useTop === null ? '' : this.pidKey(useTop.type_id)));
       this.initFilters();
       let r = await SiteApi.getList(site, this.curClass, 1, FilterUtil.toQuery(this.sels));
       if (seq !== this.loadSeq) {
@@ -465,6 +508,7 @@ struct Index {
       this.items = this.withSort(this.raw);
       this.page = 1;
       this.pageCount = r.pageCount;
+      this.totalCount = r.total;
       RatingStore.warm(this.items);
       if (this.items.length === 0) {
         this.err = '该站点的分类接口没有返回数据（可能已失效，换个站点试试）';
@@ -699,6 +743,7 @@ struct Index {
       this.items = this.withSort(this.raw);
       this.page = 1;
       this.pageCount = r.pageCount;
+      this.totalCount = r.total;
       RatingStore.warm(this.items);
       this.err = this.items.length === 0 ? '这个筛选条件下没有结果' : '';
     } catch (e) {
@@ -927,6 +972,19 @@ struct Index {
     return true;
   }
 
+  /** 按 id 找分类（一级二级都找），找不到返回 null */
+  private classOf(id: string): VodClass | null {
+    if (id.length === 0) {
+      return null;
+    }
+    for (const c of this.classes) {
+      if (this.pidKey(c.type_id) === id) {
+        return c;
+      }
+    }
+    return null;
+  }
+
   private childrenOf(pid: string): VodClass[] {
     const out: VodClass[] = [];
     if (pid.length === 0) {
@@ -1026,6 +1084,7 @@ struct Index {
       this.items = this.withSort(this.raw);
       this.page = next;
       this.pageCount = r.pageCount;
+      this.totalCount = r.total;
       RatingStore.warm(r.items);
     } catch (e) {
       // 加载更多失败不打断浏览
@@ -1062,6 +1121,7 @@ struct Index {
     this.items = [];
     this.page = 1;
     this.pageCount = 1;
+    this.totalCount = 0;
     this.err = '';
     this.lastSig = '';
     this.classNote = '';
@@ -1070,325 +1130,602 @@ struct Index {
     await this.loadAll();
   }
 
-  build() {
-    Stack({ alignContent: Alignment.Center }) {
-      Column() {
-        TopBar({
-          active: 0,
-          showActions: true,
-          siteName: this.siteName,
-          filterCount: this.activeFilterCount(),
-          collectText: this.collectLabel(),
-          onFilter: () => { this.showFilter = true; },
-          onSites: () => { this.showSites = true; },
-          onSearch: () => { router.pushUrl({ url: 'pages/Search' }); },
-          onCollect: () => { this.toggleCurrent(); }
-        })
+  // ---------------- 视图（现代版：与首页同一套视觉语言） ----------------
 
-        // 一级分类（电影片 / 连续剧 / 综艺片 / 动漫片 …）
+  /** 遥控器焦点 + 鼠标悬停（灵犀遥控器按鼠标上报） */
+  private hot(id: string): boolean {
+    return this.focusId === id || this.hoverId === id;
+  }
+
+  private clearHot(id: string): void {
+    if (this.focusId === id) {
+      this.focusId = '';
+    }
+  }
+
+  /** 顶栏动作统一分发，@Builder 里不传函数指针 */
+  private onTopAction(id: string): void {
+    if (id === 'search') {
+      router.pushUrl({ url: 'pages/Search' }).catch(() => {});
+    } else if (id === 'filter') {
+      this.showFilter = true;
+    } else if (id === 'sites') {
+      this.showSites = true;
+    } else if (id === 'collect') {
+      this.toggleCurrent();
+    }
+  }
+
+  /**
+   * 「共 N 部」用接口返回的 total，不是已加载条数。
+   * 列表是懒加载的，用 items.length 会随着下拉不断变大（20 → 40 → 60），
+   * 那是个假数字。站点不返回 total 时干脆不显示，宁缺勿错。
+   */
+  private countText(): string {
+    if (this.totalCount <= 0) {
+      return '';
+    }
+    return '共 ' + this.totalCount.toString() + ' 部';
+  }
+
+  /** 顶栏的胶囊按钮：图标 + 文字，焦点/悬停时描边点亮 */
+  @Builder
+  topAction(id: string, label: string, sym: Resource) {
+    Row({ space: 7 }) {
+      SymbolGlyph(sym)
+        .fontSize(15)
+        .fontColor([this.hot(id) ? '#FFD9BC' : '#A5A5B0'])
+        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      Text(label)
+        .fontSize(13.5)
+        .fontColor(this.hot(id) ? '#FFD9BC' : '#C9C9D4')
+    }
+    .height(40)
+    .padding({ left: 16, right: 18 })
+    .borderRadius(20)
+    .backgroundColor(this.hot(id) ? '#1C1D25' : '#12FFFFFF')
+    .border({ width: this.hot(id) ? 1.5 : 1, color: this.hot(id) ? '#FFD9BC' : '#22FFFFFF' })
+    .focusable(true)
+    .onFocus(() => { this.focusId = id; })
+    .onBlur(() => { this.clearHot(id); })
+    .onHover((isHover: boolean) => { this.hoverId = isHover ? id : ''; })
+    .onClick(() => { this.onTopAction(id); })
+  }
+
+  /**
+   * 顶栏的「资源站」下拉入口：直接显示当前站点名，右侧一个小三角。
+   *
+   * 为什么不放图标：站名本身就带表情图标（「🎬暴风资源」），再叠一个硬盘图标
+   * 就是两个图标抢位置；而且十尺外看，站名比图标有用得多。
+   */
+  @Builder
+  siteButton() {
+    Row({ space: 7 }) {
+      Text(this.siteName.length > 0 ? this.siteName : '选择资源站')
+        .fontSize(13.5)
+        .fontColor((this.hot('sites') || this.showSites) ? '#FFD9BC' : '#C9C9D4')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .constraintSize({ maxWidth: 200 })
+      SymbolGlyph($r('sys.symbol.chevron_down'))
+        .fontSize(11)
+        .fontColor([(this.hot('sites') || this.showSites) ? '#FFD9BC' : '#8E8E9A'])
+        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+        .rotate({ angle: this.showSites ? 180 : 0 })
+        .animation({ duration: 120 })
+    }
+    .height(40)
+    .padding({ left: 16, right: 14 })
+    .borderRadius(20)
+    .backgroundColor((this.hot('sites') || this.showSites) ? '#1C1D25' : '#12FFFFFF')
+    .border({
+      width: (this.hot('sites') || this.showSites) ? 1.5 : 1,
+      color: (this.hot('sites') || this.showSites) ? '#FFD9BC' : '#22FFFFFF'
+    })
+    .focusable(true)
+    .onFocus(() => { this.focusId = 'sites'; })
+    .onBlur(() => { this.clearHot('sites'); })
+    .onHover((isHover: boolean) => { this.hoverId = isHover ? 'sites' : ''; })
+    .onClick(() => { this.showSites = !this.showSites; })
+  }
+
+  /** 一级分类 */
+  @Builder
+  topChip(c: VodClass) {
+    Row() {
+      Text(c.type_name)
+        .fontSize(16.5)
+        .fontWeight(this.pidKey(c.type_id) === this.curTop ? FontWeight.Bold : FontWeight.Normal)
+        .fontColor(this.pidKey(c.type_id) === this.curTop ? '#150A04' : '#C9C9D4')
+    }
+    .height(40)
+    .padding({ left: 20, right: 20 })
+    .borderRadius(13)
+    .backgroundColor(this.pidKey(c.type_id) === this.curTop ? '#FF8A3D'
+      : (this.hot('T' + c.type_id) ? '#1FFFFFFF' : '#12FFFFFF'))
+    .shadow(this.pidKey(c.type_id) === this.curTop
+      ? { radius: 22, color: '#59FF8A3D', offsetX: 0, offsetY: 6 }
+      : { radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
+    .focusable(true)
+    .onFocus(() => { this.focusId = 'T' + c.type_id; })
+    .onBlur(() => { this.clearHot('T' + c.type_id); })
+    .onHover((isHover: boolean) => { this.hoverId = isHover ? 'T' + c.type_id : ''; })
+    .onClick(() => { this.switchTop(c); })
+  }
+
+  /** 二级分类 */
+  @Builder
+  subChip(c: VodClass) {
+    Row() {
+      Text(c.type_name)
+        .fontSize(13.5)
+        .fontColor(c.type_id === this.curClass ? '#FFB37A' : '#9C9CA8')
+    }
+    .height(33)
+    .padding({ left: 15, right: 15 })
+    .borderRadius(11)
+    .backgroundColor(c.type_id === this.curClass ? '#22FF8A3D'
+      : (this.hot('S' + c.type_id) ? '#1AFFFFFF' : '#0DFFFFFF'))
+    .border({
+      width: 1,
+      color: c.type_id === this.curClass ? '#73FF8A3D'
+        : (this.hot('S' + c.type_id) ? '#2EFFFFFF' : Color.Transparent)
+    })
+    .focusable(true)
+    .onFocus(() => { this.focusId = 'S' + c.type_id; })
+    .onBlur(() => { this.clearHot('S' + c.type_id); })
+    .onHover((isHover: boolean) => { this.hoverId = isHover ? 'S' + c.type_id : ''; })
+    .onClick(() => { this.switchClass(c); })
+  }
+
+  /** 排序 / 方向 / 解锁这一排小胶囊 */
+  @Builder
+  miniPill(id: string, label: string, on: boolean, accent: boolean) {
+    Row() {
+      Text(label)
+        .fontSize(13)
+        .fontWeight(on ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(on ? (accent ? '#150A04' : '#FFB37A') : '#9C9CA8')
+    }
+    .height(32)
+    .padding({ left: 14, right: 14 })
+    .borderRadius(11)
+    .backgroundColor(on ? (accent ? '#FF8A3D' : '#22FF8A3D')
+      : (this.hot(id) ? '#1AFFFFFF' : '#0DFFFFFF'))
+    .border({ width: 1, color: on ? Color.Transparent : (this.hot(id) ? '#2EFFFFFF' : Color.Transparent) })
+    .focusable(true)
+    .onFocus(() => { this.focusId = id; })
+    .onBlur(() => { this.clearHot(id); })
+    .onHover((isHover: boolean) => { this.hoverId = isHover ? id : ''; })
+    .onClick(() => { this.onPill(id); })
+  }
+
+  /** 受限分类总数：解锁按钮上的数字按它算，不用管受限项挂在一级还是二级 */
+  private lockTotal(): number {
+    return this.lockedTopCount + this.lockedCount;
+  }
+
+  /** 解锁入口：位置固定在一级分类行最右端，样式独立于排序胶囊，带锁图标更好认 */
+  @Builder
+  lockChip() {
+    Row({ space: 6 }) {
+      SymbolGlyph(this.unlocked ? $r('sys.symbol.lock_open_fill') : $r('sys.symbol.lock_fill'))
+        .fontSize(12)
+        .fontColor(['#FFB37A'])
+        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      Text(this.unlocked ? '重新上锁' : '解锁 ' + this.lockTotal().toString())
+        .fontSize(12.5)
+        .fontColor('#FFB37A')
+        .maxLines(1)
+    }
+    .height(32)
+    .padding({ left: 12, right: 13 })
+    .borderRadius(11)
+    .backgroundColor(this.hot('lock') ? '#2EFF8A3D' : '#1AFF8A3D')
+    .border({ width: 1, color: '#73FF8A3D' })
+    .margin({ left: 12 })
+    .focusable(true)
+    .onFocus(() => { this.focusId = 'lock'; })
+    .onBlur(() => { this.clearHot('lock'); })
+    .onHover((isHover: boolean) => { this.hoverId = isHover ? 'lock' : ''; })
+    .onClick(() => { this.onPill('lock'); })
+  }
+
+  private onPill(id: string): void {
+    if (id === 's-dir') {
+      this.toggleSortDir();
+    } else if (id === 's-new') {
+      this.setSort(SORT_NEW);
+    } else if (id === 's-score') {
+      this.setSort(SORT_SCORE);
+    } else if (id === 'lock') {
+      if (this.unlocked) {
+        this.relockVod();
+      } else {
+        this.openPinDialog();
+      }
+    }
+  }
+
+  /** 顶栏 + 分类区 + 海报墙 */
+  @Builder
+  main() {
+    Column() {
+      // ---------- 顶栏 ----------
+      Row() {
+        // 标题 / 计数 / 说明并成一行：小字另起一行会把顶栏撑高，显得又空又挤
+        Row({ space: 12 }) {
+          Text('点播')
+            .fontSize(34)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF')
+          if (this.countText().length > 0) {
+            Text(this.countText())
+              .fontSize(12.5)
+              .fontColor('#8E8E9A')
+              .padding({ left: 9, right: 9, top: 3, bottom: 3 })
+              .borderRadius(7)
+              .backgroundColor('#12FFFFFF')
+          }
+          if (this.totalCount > 0) {
+            Text('按最新上架排序 · 下拉站点切换')
+              .fontSize(12.5)
+              .fontColor('#7E7E8A')
+          }
+        }
+        // 居中对齐：34 号标题的行框比小字高得多，底对齐会让小字贴到字形底缘，
+        // 看着像被往下拽了一截
+        .alignItems(VerticalAlign.Center)
+
+        Blank()
+
+        Row({ space: 10 }) {
+          this.topAction('search', '搜索', $r('sys.symbol.magnifyingglass'))
+          this.topAction('filter',
+            this.activeFilterCount() > 0 ? '筛选 ' + this.activeFilterCount().toString() : '筛选',
+            $r('sys.symbol.line_3_horizontal'))
+          this.siteButton()
+          this.topAction('collect', this.collectLabel(), this.collectIcon())
+        }
+      }
+      .width('100%')
+      .height(56)
+      .padding({ left: 44, right: 36 })
+      .margin({ top: 26 })
+
+      // ---------- 一级分类 + 排序 ----------
+      Row() {
+        List({ space: 9 }) {
+          ForEach(this.tops, (c: VodClass) => {
+            ListItem() {
+              this.topChip(c)
+            }
+          }, (c: VodClass) => 'T' + c.type_id)
+        }
+        .listDirection(Axis.Horizontal)
+        .height(48)
+        .layoutWeight(1)
+        .scrollBar(BarState.Off)
+
+        // 排序：采集站 API 不认 order 参数，能真正改变结果的只有两个维度 + 一个方向
+        Row({ space: 7 }) {
+          this.miniPill('s-dir', this.sortAsc ? '升序 ↑' : '降序 ↓', false, false)
+          this.miniPill('s-new', '最新', this.sortMode === SORT_NEW, true)
+          this.miniPill('s-score', '评分', this.sortMode === SORT_SCORE, true)
+        }
+        .margin({ left: 12 })
+
+        // 解锁入口**固定在这一行的最右端**：原来它跟着「受限项在一级还是二级」两头跑，
+        // 有时挂在一级分类行、有时挤到二级分类行末尾，看起来位置飘忽。
+        // 现在不管当前分类下有没有受限项，入口永远在同一个位置。
+        if (this.lockTotal() > 0 && this.pin.length > 0) {
+          this.lockChip()
+        }
+      }
+      .width('100%')
+      .height(48)
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 44, right: 36 })
+      .margin({ top: 2 })
+
+      // ---------- 二级分类 ----------
+      if (this.subs.length > 0) {
         Row() {
-          List({ space: 10 }) {
-            ForEach(this.tops, (c: VodClass) => {
+          List({ space: 8 }) {
+            ForEach(this.subs, (c: VodClass) => {
               ListItem() {
-                Text(c.type_name)
-                  .fontSize(17)
-                  .fontWeight(this.pidKey(c.type_id) === this.curTop ? FontWeight.Bold : FontWeight.Normal)
-                  .fontColor(this.pidKey(c.type_id) === this.curTop ? '#ffffff' : '#cccccc')
-                  .backgroundColor(this.pidKey(c.type_id) === this.curTop ? '#FF6B00' : '#2a2a2a')
-                  .padding({ left: 18, right: 18, top: 9, bottom: 9 })
-                  .borderRadius(6)
-                  .focusable(true)
-                  .onClick(() => { this.switchTop(c); })
+                this.subChip(c)
               }
-            }, (c: VodClass) => 'T' + c.type_id)
+            }, (c: VodClass) => 'S' + c.type_id)
           }
           .listDirection(Axis.Horizontal)
-          .height(56)
+          .height(40)
           .layoutWeight(1)
           .scrollBar(BarState.Off)
-
-          // 一级分类里也可能有受限项（站点直接把「伦理片」当一级给出），
-          // 这时解锁入口放在这一行；解锁是全局的，一次把一级 + 二级全放出来
-          if (this.lockedTopCount > 0 && this.pin.length > 0) {
-            Text(this.unlocked ? '🔓 重新上锁'
-              : '🔒 解锁 ' + (this.lockedTopCount + this.lockedCount))
-              .fontSize(14)
-              .fontColor('#FFB35C')
-              .backgroundColor('#2a2013')
-              .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-              .borderRadius(14)
-              .margin({ left: 10 })
-              .focusable(true)
-              .onClick(() => {
-                if (this.unlocked) {
-                  this.relockVod();
-                } else {
-                  this.openPinDialog();
-                }
-              })
-          }
-
-          // 排序：采集站 API 不认 order 参数，能真正改变结果的只有两个维度 + 一个方向。
-          // 「最新」= 站点返回的原始顺序；「评分」= 客户端按已刮到的豆瓣分重排。
-          // 左边那个橙色胶囊是方向开关，点一下在降序 / 升序之间切。
-          Row() {
-            Text(this.sortAsc ? '升序 ↑' : '降序 ↓')
-              .fontSize(14)
-              .fontColor('#FFB35C')
-              .backgroundColor('#2a2013')
-              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-              .borderRadius(14)
-              .margin({ right: 14 })
-              .focusable(true)
-              .onClick(() => { this.toggleSortDir(); })
-            Text('排序')
-              .fontSize(13)
-              .fontColor('#777777')
-              .margin({ right: 8 })
-            Text('最新')
-              .fontSize(14)
-              .fontColor(this.sortMode === SORT_NEW ? '#ffffff' : '#9aa9b8')
-              .backgroundColor(this.sortMode === SORT_NEW ? '#3a3a3a' : '#1f1f1f')
-              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-              .borderRadius(14)
-              .focusable(true)
-              .onClick(() => { this.setSort(SORT_NEW); })
-            Text('评分')
-              .fontSize(14)
-              .fontColor(this.sortMode === SORT_SCORE ? '#ffffff' : '#9aa9b8')
-              .backgroundColor(this.sortMode === SORT_SCORE ? '#FF6B00' : '#1f1f1f')
-              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-              .borderRadius(14)
-              .margin({ left: 8 })
-              .focusable(true)
-              .onClick(() => { this.setSort(SORT_SCORE); })
-          }
-          .margin({ left: 16 })
         }
         .width('100%')
-        .padding({ left: 28, right: 28, top: 6 })
+        .height(40)
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 44, right: 36 })
+        .margin({ top: 8 })
+      }
 
-        // 二级分类：只有当前一级真的有子分类时才出现（没有 pid 的站点不会多出这一行）
-        if (this.subs.length > 0 || (this.lockedCount > 0 && this.lockedTopCount === 0)) {
-          Row() {
-            // 行顶部对齐：二级芯片是"上对齐+6px 内边距"，解锁文字若随行居中会整体偏低
-            List({ space: 8 }) {
-              ForEach(this.subs, (c: VodClass) => {
-                ListItem() {
-                  Text(c.type_name)
-                    .fontSize(15)
-                    .fontColor(c.type_id === this.curClass ? '#FF6B00' : '#9aa9b8')
-                    .backgroundColor(c.type_id === this.curClass ? '#332613' : '#1f1f1f')
-                    .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-                    .borderRadius(14)
-                    .focusable(true)
-                    .onClick(() => { this.switchClass(c); })
-                }
-              }, (c: VodClass) => 'S' + c.type_id)
+      // 站点分类接口没真过滤时，点完给一句说明，别让用户以为点坏了
+      if (this.classNote.length > 0) {
+        Row() {
+          Text(this.classNote)
+            .fontSize(12.5)
+            .fontColor('#FFB37A')
+            .backgroundColor('#1AFF8A3D')
+            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+            .borderRadius(9)
+            .maxLines(2)
+        }
+        .width('100%')
+        .padding({ left: 44, right: 36 })
+        .margin({ top: 8 })
+      }
+
+      // 已选筛选条件回显
+      if (this.activeFilterCount() > 0) {
+        Row() {
+          ForEach(this.sels, (s: FilterSel, i: number) => {
+            if (s.value) {
+              Text(s.label)
+                .fontSize(11.5)
+                .fontColor('#FFB37A')
+                .backgroundColor('#1AFF8A3D')
+                .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+                .borderRadius(8)
+                .margin({ right: 8 })
             }
-            .listDirection(Axis.Horizontal)
+          }, (s: FilterSel, i: number) => s.key + s.value)
+        }
+        .width('100%')
+        .padding({ left: 44, right: 36 })
+        .margin({ top: 8 })
+      }
+
+      // ---------- 主区 ----------
+      if (this.needConfig) {
+        Column({ space: 16 }) {
+          Text('还没有可用的点播站点')
+            .fontSize(24)
+            .fontColor('#FFFFFF')
+          Text('去「设置」载入一个配置地址')
+            .fontSize(14)
+            .fontColor('#9C9CA8')
+          Text('打开设置')
+            .fontSize(15)
+            .fontColor('#150A04')
             .height(46)
-            .layoutWeight(1)
-            .scrollBar(BarState.Off)
-
-            // 分类栏末尾的解锁入口：输对 PIN 后本次运行内把隐藏的分类放出来
-            // （一级栏那个按钮已经在显示时，这里不重复出现，免得两个一样的按钮）
-            if (this.lockedCount > 0 && this.lockedTopCount === 0
-              && this.pin.length > 0) {
-              Text(this.unlocked ? '🔓 重新上锁' : '🔒 解锁 ' + this.lockedCount)
-                .fontSize(14)
-                .fontColor('#FFB35C')
-                .backgroundColor('#2a2013')
-                .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-                .borderRadius(14)
-                .margin({ left: 10 })
-                .focusable(true)
-                .onClick(() => {
-                  if (this.unlocked) {
-                    this.relockVod();
-                  } else {
-                    this.openPinDialog();
-                  }
-                })
+            .padding({ left: 26, right: 26 })
+            .borderRadius(23)
+            .backgroundColor('#FF8A3D')
+            .textAlign(TextAlign.Center)
+            .focusable(true)
+            .onClick(() => { router.replaceUrl({ url: 'pages/Settings' }).catch(() => {}); })
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+      } else if (this.loading && this.items.length === 0) {
+        Column({ space: 12 }) {
+          LoadingProgress().width(44).height(44).color('#FF8A3D')
+          Text('正在加载…')
+            .fontSize(13.5)
+            .fontColor('#8E8E9A')
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+      } else {
+        if (this.err.length > 0) {
+          Text(this.err)
+            .fontSize(13)
+            .fontColor('#FF8B7A')
+            .width('100%')
+            .padding({ left: 44, top: 8 })
+        }
+        Grid() {
+          ForEach(this.items, (item: VodItem) => {
+            GridItem() {
+              PosterCard({
+                item: item,
+                modern: true,
+                cardW: 172,
+                cardH: 258,
+                onSelect: () => this.goDetail(item)
+              })
             }
-          }
-          .width('100%')
-          .alignItems(VerticalAlign.Top)
-          .padding({ left: 28, right: 28, top: 2 })
+          }, (item: VodItem) => String(item.site_key ? item.site_key : '') + '_' + String(item.vod_id))
         }
+        .columnsTemplate('1fr 1fr 1fr 1fr 1fr 1fr')
+        .columnsGap(16)
+        .rowsGap(20)
+        // 左 44 + 右 36 = 1112，正好 6×172 + 5×16，卡片与栅格严丝合缝
+        .padding({ left: 44, right: 36, top: 14, bottom: 26 })
+        .layoutWeight(1)
+        .scrollBar(BarState.Off)
+        .cachedCount(6)
+        .onReachEnd(() => { this.loadMore(); })
 
-        // 站点分类接口没真过滤时，点完给一句说明，别让用户以为点坏了
-        if (this.classNote.length > 0) {
-          Row() {
-            Text(this.classNote)
-              .fontSize(13)
-              .fontColor('#FFB35C')
-              .backgroundColor('#2a2013')
-              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-              .borderRadius(8)
-              .maxLines(2)
+        // 翻页提示：加载下一批时给个明确的在跑的信号
+        if (this.loading && this.items.length > 0) {
+          Row({ space: 8 }) {
+            LoadingProgress().width(16).height(16).color('#FF8A3D')
+            Text('正在加载更多…')
+              .fontSize(12)
+              .fontColor('#8E8E9A')
           }
           .width('100%')
-          .padding({ left: 28, right: 28, top: 6 })
+          .padding({ left: 44, bottom: 10 })
         }
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
 
-        // 已选条件回显
-        if (this.activeFilterCount() > 0) {
-          Row() {
-            ForEach(this.sels, (s: FilterSel, i: number) => {
-              if (s.value) {
-                Text(s.label)
-                  .fontSize(12)
-                  .fontColor('#FF6B00')
-                  .backgroundColor('#332613')
-                  .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-                  .borderRadius(10)
-                  .margin({ right: 8 })
-              }
-            }, (s: FilterSel, i: number) => s.key + s.value)
-          }
-          .width('100%')
-          .padding({ left: 28, top: 6 })
-        }
+  build() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      // ---------- 背景：暗底 + 顶部一层琥珀暖光 ----------
+      Column()
+        .width('100%')
+        .height('100%')
+        .linearGradient({
+          angle: 160,
+          colors: [['#1F1A1208', 0.0], ['#0C08090B', 0.45], ['#08090B', 1.0]]
+        })
 
-        if (this.needConfig) {
-          Column() {
-            Text('还没有点播源').fontSize(22).fontColor('#dddddd')
-            Text('去「设置」填入一个配置地址，或把你的采集站收进 Default')
-              .fontSize(15).fontColor('#888888').margin({ top: 12 })
-              .maxLines(2)
-              .textAlign(TextAlign.Center)
-            Button('去设置').margin({ top: 26 })
-              .onClick(() => { router.replaceUrl({ url: 'pages/Settings' }); })
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .justifyContent(FlexAlign.Center)
-        } else if (this.loading && this.items.length === 0) {
-          Column() {
-            LoadingProgress().width(48).height(48)
-            Text('加载中…').fontSize(14).fontColor('#999999').margin({ top: 10 })
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .justifyContent(FlexAlign.Center)
-        } else {
-          if (this.err) {
-            Text(this.err).fontSize(14).fontColor('#ff7777')
-              .width('100%').padding({ left: 28, top: 6 })
-          }
-          Grid() {
-            ForEach(this.items, (item: VodItem) => {
-              GridItem() {
-                PosterCard({ item: item, onSelect: () => this.goDetail(item) })
-              }
-            }, (item: VodItem) => String(item.site_key ? item.site_key : '') + '_' + String(item.vod_id))
-          }
-          .columnsTemplate('1fr 1fr 1fr 1fr 1fr 1fr')
-          .columnsGap(14)
-          .rowsGap(18)
-          .padding({ left: 28, right: 28, top: 12, bottom: 20 })
-          .layoutWeight(1)
-          .onReachEnd(() => { this.loadMore(); })
+      Row() {
+        SideNav({ active: 1, siteName: this.siteName })
+        // 必须 layoutWeight(1)：写 width('100%') 会按整个 Row 的宽度算，
+        // 再加上左边 88 的导航栏就顶出屏幕
+        Column() {
+          this.main()
         }
+        .layoutWeight(1)
+        .height('100%')
       }
       .width('100%')
       .height('100%')
 
-      // 站点选择浮层
+      // ---------- 资源站下拉菜单：贴着顶栏按钮正下方展开 ----------
       if (this.showSites) {
+        // 点空白处收起（透明遮罩，不压暗：这是下拉，不是模态）
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#01000000')
+          .onClick(() => { this.showSites = false; })
+
         Column() {
-          Column() {
-            Row() {
-              Text('选择资源站').fontSize(20).fontColor('#ffffff').fontWeight(FontWeight.Bold)
-              Blank()
-              Button('关闭').fontSize(14).height(36)
-                .onClick(() => { this.showSites = false; })
-            }
-            .width('100%')
-            .margin({ bottom: 8 })
-
-            Text('点名字切换站点 · 点右侧按钮把能出内容的站收进 Default'
-              + '（已收 ' + Math.max(0, this.myApis.length - 1) + ' 个，重启后仍在）')
+          Row() {
+            Text('切换资源站')
               .fontSize(12)
-              .fontColor('#888888')
-              .width('100%')
-              .margin({ bottom: 12 })
-
-            List({ space: 10 }) {
-              ForEach(this.sites, (s: SiteCfg) => {
-                ListItem() {
-                  Row() {
-                    Text(s.name)
-                      .fontSize(16)
-                      .fontColor(s.key === this.siteKey ? '#FF6B00' : '#dddddd')
-                      .layoutWeight(1)
-                      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-                      .backgroundColor(s.key === this.siteKey ? '#332613' : '#2a2a2a')
-                      .borderRadius(8)
-                      .focusable(true)
-                      .onClick(() => { this.switchSite(s); })
-                    Text(this.mySiteLabel(s))
-                      .fontSize(13)
-                      .fontColor(this.inMySites(s.api) ? '#7fd88a' : '#FF9F45')
-                      .backgroundColor('#1b1b1b')
-                      .padding({ left: 14, right: 14, top: 12, bottom: 12 })
-                      .borderRadius(8)
-                      .margin({ left: 10 })
-                      .focusable(true)
-                      .onClick(() => { this.toggleMySite(s); })
-                  }
-                  .width('100%')
-                }
-              }, (s: SiteCfg) => s.key + '_' + this.myRev)
-            }
-            .layoutWeight(1)
-            .width('100%')
-            .scrollBar(BarState.Off)
+              .fontColor('#7E7E8A')
+            Blank()
+            Text(this.sites.length.toString() + ' 个')
+              .fontSize(11.5)
+              .fontColor('#5F5F6B')
           }
-          .width('56%')
-          .height('70%')
-          .backgroundColor('#222222')
-          .borderRadius(14)
-          .padding(20)
+          .width('100%')
+          .padding({ left: 4, right: 4 })
+          .margin({ bottom: 9 })
+
+          List({ space: 6 }) {
+            ForEach(this.sites, (s: SiteCfg) => {
+              ListItem() {
+                Row() {
+                  Text(s.name)
+                    .fontSize(15)
+                    .fontColor(s.key === this.siteKey ? '#FFB37A' : '#DDDDE6')
+                    .layoutWeight(1)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .padding({ left: 14, right: 12, top: 11, bottom: 11 })
+                    .backgroundColor(s.key === this.siteKey ? '#22FF8A3D' : Color.Transparent)
+                    .borderRadius(11)
+                    .border({
+                      width: 1,
+                      color: s.key === this.siteKey ? '#73FF8A3D' : Color.Transparent
+                    })
+                    .focusable(true)
+                    .onHover((isHover: boolean) => { this.hoverId = isHover ? 'st_' + s.key : ''; })
+                    .onClick(() => { this.switchSite(s); })
+                  Text(this.mySiteLabel(s))
+                    .fontSize(11.5)
+                    .fontColor(this.inMySites(s.api) ? '#8FE09A' : '#FFB37A')
+                    .backgroundColor('#12FFFFFF')
+                    .padding({ left: 10, right: 10, top: 11, bottom: 11 })
+                    .borderRadius(11)
+                    .margin({ left: 6 })
+                    .focusable(true)
+                    .onHover((isHover: boolean) => { this.hoverId = isHover ? 'cl_' + s.key : ''; })
+                    .onClick(() => { this.toggleMySite(s); })
+                }
+                .width('100%')
+              }
+            }, (s: SiteCfg) => s.key + '_' + this.myRev)
+          }
+          .width('100%')
+          .constraintSize({ maxHeight: 300 })
+          .scrollBar(BarState.Off)
+
+          Text('点站名切换 · 右侧按钮把站收进 Default')
+            .fontSize(10.5)
+            .fontColor('#5F5F6B')
+            .width('100%')
+            .padding({ left: 4 })
+            .margin({ top: 10 })
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor('#000000aa')
-        .justifyContent(FlexAlign.Center)
+        .width(340)
+        .padding(16)
+        .backgroundColor('#14151C')
+        .border({ width: 1, color: '#1AFFFFFF' })
+        .borderRadius(18)
+        .shadow({ radius: 44, color: '#B3000000', offsetX: 0, offsetY: 18 })
+        // 右边缘与顶栏按钮对齐：1280 - 36(右内距) - 340(菜单宽)
+        .position({ x: 904, y: 88 })
       }
 
-      // 筛选浮层
+      // ---------- 筛选浮层 ----------
       if (this.showFilter) {
         Column() {
           Column() {
             Row() {
-              Text('筛选').fontSize(20).fontColor('#ffffff').fontWeight(FontWeight.Bold)
+              Text('筛选')
+                .fontSize(19)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
               Blank()
-              Button('重置').fontSize(14).height(36).backgroundColor('#3a3a3a')
-              .fontColor('#ffffff')
-                .onClick(() => { this.resetFilters(); })
-              Button('关闭').fontSize(14).height(36).margin({ left: 10 })
-                .onClick(() => { this.showFilter = false; })
+              Row() {
+                Text('重置')
+                  .fontSize(13.5)
+                  .fontColor('#C9C9D4')
+              }
+              .height(36)
+              .padding({ left: 18, right: 18 })
+              .borderRadius(18)
+              .backgroundColor('#1FFFFFFF')
+              .focusable(true)
+              .onClick(() => { this.resetFilters(); })
+              Row() {
+                Text('关闭')
+                  .fontSize(13.5)
+                  .fontColor('#150A04')
+              }
+              .height(36)
+              .padding({ left: 18, right: 18 })
+              .borderRadius(18)
+              .backgroundColor('#FF8A3D')
+              .margin({ left: 10 })
+              .focusable(true)
+              .onClick(() => { this.showFilter = false; })
             }
             .width('100%')
-            .margin({ bottom: 14 })
+            .margin({ bottom: 16 })
 
             Scroll() {
               Column() {
                 ForEach(this.filterGroups, (g: FilterGroup, gi: number) => {
                   Column() {
-                    Text(g.name).fontSize(14).fontColor('#888888').width('100%')
-                      .margin({ bottom: 8 })
+                    Text(g.name)
+                      .fontSize(12.5)
+                      .fontColor('#7E7E8A')
+                      .width('100%')
+                      .margin({ bottom: 9 })
                     Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
                       ForEach(g.values, (v: FilterValue) => {
                         Text(v.n)
-                          .fontSize(14)
-                          .fontColor(this.isSel(gi, v.v) ? '#ffffff' : '#cccccc')
-                          .backgroundColor(this.isSel(gi, v.v) ? '#FF6B00' : '#2a2a2a')
-                          .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-                          .borderRadius(6)
-                          .margin({ right: 10, bottom: 10 })
+                          .fontSize(13.5)
+                          .fontColor(this.isSel(gi, v.v) ? '#150A04' : '#C9C9D4')
+                          .backgroundColor(this.isSel(gi, v.v) ? '#FF8A3D' : '#12FFFFFF')
+                          .padding({ left: 15, right: 15, top: 9, bottom: 9 })
+                          .borderRadius(11)
+                          .margin({ right: 9, bottom: 9 })
                           .focusable(true)
                           .onClick(() => { this.pickFilter(gi, v); })
                       }, (v: FilterValue) => g.key + '_' + v.v + '_' + v.n)
@@ -1397,39 +1734,50 @@ struct Index {
                   }
                   .width('100%')
                   .alignItems(HorizontalAlign.Start)
-                  .margin({ bottom: 18 })
+                  .margin({ bottom: 16 })
                 }, (g: FilterGroup) => g.key)
               }
               .width('100%')
             }
-            .layoutWeight(1)
             .width('100%')
+            .constraintSize({ maxHeight: 440 })
             .align(Alignment.Top)
             .scrollBar(BarState.Off)
           }
           .width('62%')
-          .height('72%')
-          .backgroundColor('#222222')
-          .borderRadius(14)
-          .padding(22)
+          .constraintSize({ maxHeight: '78%' })
+          .backgroundColor('#14151C')
+          .border({ width: 1, color: '#1AFFFFFF' })
+          .borderRadius(22)
+          .padding(24)
+          .shadow({ radius: 60, color: '#B3000000', offsetX: 0, offsetY: 24 })
         }
         .width('100%')
         .height('100%')
-        .backgroundColor('#000000aa')
+        .backgroundColor('#B3000000')
         .justifyContent(FlexAlign.Center)
       }
 
-      // 家长锁：输入 4 位 PIN，解锁本次运行内被隐藏的二级分类
+      // ---------- 家长锁 ----------
       if (this.pinOpen) {
         Column() {
           Column() {
-            Text('家长锁').fontSize(20).fontColor('#ffffff').fontWeight(FontWeight.Bold)
+            Text('家长锁')
+              .fontSize(19)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#FFFFFF')
             Text('输入 4 位 PIN 解锁')
-              .fontSize(13).fontColor('#9aa9b8').margin({ top: 8 })
+              .fontSize(12.5)
+              .fontColor('#8E8E9A')
+              .margin({ top: 8 })
             TextInput({ text: this.pinInput, placeholder: '4 位数字' })
-              .width('100%').height(48).fontSize(18)
-              .fontColor('#ffffff').placeholderColor('#777777')
-              .backgroundColor('#2a2a2a').borderRadius(8)
+              .width('100%')
+              .height(48)
+              .fontSize(18)
+              .fontColor('#FFFFFF')
+              .placeholderColor('#6E6E7A')
+              .backgroundColor('#12FFFFFF')
+              .borderRadius(12)
               // NUMBER_PASSWORD = 数字键盘 + 圆点掩码，电视上不显示明文也不弹全键盘
               .type(InputType.NUMBER_PASSWORD)
               .showPasswordIcon(false)
@@ -1440,51 +1788,73 @@ struct Index {
               .defaultFocus(true)
               .onChange((v: string) => { this.pinInput = v; })
             if (this.pinErr.length > 0) {
-              Text(this.pinErr).fontSize(13).fontColor('#ff9999').width('100%').margin({ top: 8 })
+              Text(this.pinErr)
+                .fontSize(12.5)
+                .fontColor('#FF8B7A')
+                .width('100%')
+                .margin({ top: 8 })
             }
-            Row() {
-              Button('取消')
-                .fontSize(14).height(40).backgroundColor('#3a3a3a').fontColor('#ffffff')
-                .onClick(() => { this.pinOpen = false; })
-              Button('解锁')
-                .fontSize(14).height(40).backgroundColor('#FF6B00').fontColor('#ffffff')
-                .margin({ left: 12 })
-                .onClick(() => { this.confirmPin(); })
+            Row({ space: 10 }) {
+              Row() {
+                Text('取消')
+                  .fontSize(13.5)
+                  .fontColor('#C9C9D4')
+              }
+              .height(40)
+              .padding({ left: 20, right: 20 })
+              .borderRadius(20)
+              .backgroundColor('#1FFFFFFF')
+              .focusable(true)
+              .onClick(() => { this.pinOpen = false; })
+              Row() {
+                Text('解锁')
+                  .fontSize(13.5)
+                  .fontColor('#150A04')
+              }
+              .height(40)
+              .padding({ left: 22, right: 22 })
+              .borderRadius(20)
+              .backgroundColor('#FF8A3D')
+              .focusable(true)
+              .onClick(() => { this.confirmPin(); })
             }
             .width('100%')
             .justifyContent(FlexAlign.End)
-            .margin({ top: 16 })
+            .margin({ top: 18 })
           }
           .width(400)
-          .backgroundColor('#222222')
-          .borderRadius(14)
+          .backgroundColor('#14151C')
+          .border({ width: 1, color: '#1AFFFFFF' })
+          .borderRadius(22)
           .padding(24)
+          .shadow({ radius: 60, color: '#B3000000', offsetX: 0, offsetY: 24 })
         }
         .width('100%')
         .height('100%')
-        .backgroundColor('#000000aa')
+        .backgroundColor('#B3000000')
         .justifyContent(FlexAlign.Center)
       }
 
-      // 收集反馈：不管站点浮层开没开都能看见，且不吃遥控器点击
+      // ---------- 收集反馈（不吃遥控器点击） ----------
       if (this.toast) {
         Column() {
           Text(this.toast)
-            .fontSize(15)
-            .fontColor('#ffffff')
-            .backgroundColor('#e6333333')
-            .padding({ left: 24, right: 24, top: 12, bottom: 12 })
-            .borderRadius(22)
+            .fontSize(14.5)
+            .fontColor('#F2F2F6')
+            .backgroundColor('#E61A1B22')
+            .border({ width: 1, color: '#1AFFFFFF' })
+            .padding({ left: 22, right: 22, top: 12, bottom: 12 })
+            .borderRadius(20)
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.End)
-        .padding({ bottom: 46 })
+        .padding({ bottom: 42 })
         .hitTestBehavior(HitTestMode.None)
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#161616')
+    .backgroundColor('#08090B')
   }
 }

@@ -116,7 +116,7 @@ export class ApiStore {
     return '';
   }
 
-  /** 没填名字时，从域名推一个能看的名字：http://example.com/4k.json → example */
+  /** 没填名字时，从域名推一个能看的名字：http://xhztv.top/4k.json → xhztv */
   static guessName(url: string): string {
     let s: string = (url ?? '').trim();
     const scheme: number = s.indexOf('://');

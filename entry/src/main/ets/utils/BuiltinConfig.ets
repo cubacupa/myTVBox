@@ -8,6 +8,9 @@
  * 之所以用 builtin:// 这种伪地址，是为了让它能走完整的「地址簿 → 导入 →
  * 解析 → 落盘」流程，设置页里能和普通地址一样点一下切换；
  * ConfigStore.fetchConfigText 会拦下这个前缀，直接返回 text()，不发网络请求。
+ *
+ * 直播同理：`builtin://live` 这条地址只在你自己把直播源塞进 Default 时才有内容，
+ * 工程里不预置任何频道表（原版曾内置一份日/港/台名单，开源版已剔除）。
  */
 export class BuiltinConfig {
   static readonly URL: string = 'builtin://default';
@@ -23,6 +26,20 @@ export class BuiltinConfig {
    * 因此 Default 里所有站点都来自用户自己收集，随时可以删。
    */
   static readonly BUILTIN_API: string = '';
+
+  /**
+   * 内置直播列表的伪地址与显示名。工程里没有随包频道表，
+   * 这里的常量只是让「内置直播」这条链路（设置页展示 → 直播页解析）保持完整。
+   */
+  static readonly LIVE_URL: string = 'builtin://live';
+  static readonly LIVE_NAME: string = '内置直播';
+
+  /**
+   * 直播频道表的文件名约定：如果打包时往 resources/rawfile/live_builtin.m3u
+   * 放一份自己的频道表，EntryAbility.onCreate 会读进 liveTextCache，
+   * liveM3u() 就直接返回它。没放这个文件时读失败，返回空串（直播页就是空列表）。
+   */
+  static readonly LIVE_RAWFILE: string = 'live_builtin.m3u';
 
   private static readonly HEAD: string = '{"name":"Default","sites":[';
 
@@ -41,6 +58,25 @@ export class BuiltinConfig {
    * （多仓扫描 scanOne 就是）也能拿到最新的 Default 文本。
    */
   private static extras: string[] = [];
+
+  /**
+   * rawfile 读进来的直播文本。EntryAbility.onCreate 里通过 setLiveText 灌入。
+   * 开源版不随包附带频道表，正常情况下这里一直是空串。
+   */
+  private static liveTextCache: string = '';
+
+  static setLiveText(text: string): void {
+    BuiltinConfig.liveTextCache = text ?? '';
+  }
+
+  /** 内置直播列表文本：只可能来自你自己放进 rawfile 的那份频道表 */
+  static liveM3u(): string {
+    return BuiltinConfig.liveTextCache;
+  }
+
+  static isBuiltinLive(url: string): boolean {
+    return (url ?? '').trim() === BuiltinConfig.LIVE_URL;
+  }
 
   static setExtras(parts: string[]): void {
     BuiltinConfig.extras = parts;

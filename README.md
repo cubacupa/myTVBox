@@ -16,12 +16,14 @@
 | 配置地址 | 点播源 / 直播源**两个独立槽位**，可分别填写，互不影响；支持普通配置（`sites` / `parses` / `lives`）与多仓配置（`urls`）；本地落盘缓存，离线可打开 |
 | 手机扫码推送 | 电视自己起一个 HTTP 服务，手机连同一 Wi-Fi 扫码打开网页，粘贴地址推送，电视自动填入。无后端、带一次性 token |
 | Default 空容器 | 内置一个空的 `builtin://default`，用来**收纳你自己试出来的站点**。收的是站点本身（api / type / ext），不是配置地址，所以原接口失效也不影响 |
+| 首页 | 整屏横版剧照 + 磨砂玻璃信息面板的主推位；下方「随机推荐」20 部（各分类轮流抽，**启动时抽一批**，之后只在你点「换一批」时才变），再往下是收藏与继续观看。列表未加载时按真实尺寸铺骨架占位，不会跳版 |
 | 点播首页 | 两级分类、海报墙、滚动加载、切换站点 / 分类即时响应；排序（最新 / 评分 × 升序 / 降序）、地区 / 年份筛选 |
 | 豆瓣评分 + 海报 | 站点没海报时从豆瓣补图并取评分，本地缓存；可登录豆瓣提高配额，**默认未登录** |
 | 详情 / 播放 | 多线路切换、选集、收藏、看过的集变暗；`AVPlayer + XComponent` 播放，支持续播、点进度条跳转、倍速、快进退、上/下集、播完自动连播、实际大小 / 全屏切换 |
 | 直播 | 解析 txt 频道表（`#genre#`）与 m3u；同名频道按 `tvg-id` 合并成多线路，点开自动试线路；频道收藏、已看标记 |
 | 家长锁 | 4 位 PIN 隐藏分类名含敏感词的分类，解锁有效期 30 分钟；点播分类与播放历史两份独立解锁态。**PIN 不存明文**：本地只保存随机盐 + 迭代 SHA-256 摘要，连续错 5 次锁定 60 秒 |
 | 历史 | 按影片去重的播放记录，设了 PIN 后自动隐藏敏感分类的记录 |
+| 关于 | 版本与运行环境（从 `bundleManager` 实时读包名 / 版本）、数据来源说明、免责声明 |
 
 ---
 
@@ -68,7 +70,7 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 
 ## 四、首次使用
 
-打开 App 后首页会提示「还没有点播源」，点「去设置」：
+打开 App 后首页会提示「还没有配置片源」，点「去设置」：
 
 1. 在「点播源」填一个配置地址（例如你自己的苹果CMS 接口，或一份 `{"sites":[...]}` 配置）；
 2. 需要直播就单独填「直播源」，可填 m3u / txt / 带 `lives` 的配置；
@@ -94,13 +96,14 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 
 ```
 entry/src/main/ets/
-├── pages/          Index 点播首页 / Live 直播 / Detail 详情 / Player 播放
-│                   Search 搜索 / My 收藏 / History 历史 / Settings 设置
-├── components/     PosterCard 海报卡 / TopBar 顶栏 / QrView 二维码
+├── pages/          Home 首页 / Index 点播 / Live 直播 / Detail 详情 / Player 播放
+│                   Search 搜索 / My 收藏 / History 历史 / Settings 设置 / About 关于
+├── components/     SideNav 侧栏 / PosterCard 海报卡 / TopBar 顶栏 / QrView 二维码
 ├── model/          TvBoxModels 配置模型 / VodItem 影片
 └── utils/          ConfigStore 配置链路 / ConfigParser 解析 / SiteApi 采集站协议
-                    LiveApi 直播解析 / PosterStore 刮削 / RatingStore 评分
-                    PinStore 家长锁 / PlayProgress 进度 / PushServer 手机推送
+                    LiveApi 直播解析 / PosterStore 刮削 / BackdropStore 横版剧照
+                    RatingStore 评分 / PinStore 家长锁 / PlayProgress 进度
+                    PushServer 手机推送
 ```
 
 配置 JSON 的字段含义与原版 TVBox 一致，`model/TvBoxModels.ets` 里有完整注释。

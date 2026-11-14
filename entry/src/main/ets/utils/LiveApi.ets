@@ -1,4 +1,5 @@
 import { HttpUtil } from './HttpUtil';
+import { BuiltinConfig } from './BuiltinConfig';
 import { LiveCfg } from '../model/TvBoxModels';
 
 /** 一个频道的一条线路（同一个频道常被源站列好几条地址） */
@@ -40,7 +41,11 @@ export class LiveGroup {
  */
 export class LiveApi {
   static async load(live: LiveCfg): Promise<LiveGroup[]> {
-    // 本工程不预置直播源，所有频道表都从用户填的地址拉取
+    // 内置源不发请求：直接解析代码里那份 m3u，断网也能出频道表
+    const addr: string = (live === null || live === undefined) ? '' : (live.url ?? '').trim();
+    if (BuiltinConfig.isBuiltinLive(addr)) {
+      return LiveApi.parseM3u(BuiltinConfig.liveM3u());
+    }
     const text = await HttpUtil.getText(live.url);
     if (text.includes('#EXTM3U') || text.includes('#EXTINF')) {
       return LiveApi.parseM3u(text);

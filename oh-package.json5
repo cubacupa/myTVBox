@@ -1,8 +1,8 @@
 {
   "modelVersion": "26.0.0",
-  "name": "mytvbox",
+  "name": "moviebox",
   "version": "1.0.0",
-  "description": "HarmonyOS NEXT 智慧屏 TVBox 客户端（不含任何内容源）",
+  "description": "HarmonyOS NEXT TV 影视聚合播放器（影视仓复刻）",
   "main": "",
   "author": "",
   "license": "Apache-2.0",

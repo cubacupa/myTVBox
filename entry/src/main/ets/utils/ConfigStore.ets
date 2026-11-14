@@ -1,4 +1,5 @@
 import { common } from '@kit.AbilityKit';
+import { util } from '@kit.ArkTS';
 import { FileStore } from './FileStore';
 import { ConfigParser } from './ConfigParser';
 import { AppState } from './AppState';
@@ -36,7 +37,16 @@ export class ConfigStore {
     if (AppState.loaded) {
       return;
     }
-    // 本工程不预置任何内容源：直播一律走用户自己填的地址。
+    // 内置直播列表存在 rawfile（一千多条源，不能内联进代码）。
+    // 在 init 里读是因为：只有这里有 context，而 LiveApi 是纯静态类拿不到资源管理器；
+    // 也放不进 EntryAbility —— 它是 .ts，ArkTS 不允许 .ts 反引 .ets。
+    // 读失败不致命，BuiltinConfig.liveM3u() 会退回内联的那 27 条日港台。
+    try {
+      const raw: Uint8Array = ctx.resourceManager.getRawFileContentSync(BuiltinConfig.LIVE_RAWFILE);
+      BuiltinConfig.setLiveText(util.TextDecoder.create('utf-8').decodeToString(raw));
+    } catch (e) {
+      AppState.err = '内置直播列表读取失败：' + (e as Error).message;
+    }
     // 先把自己收集的站点灌进内置 Default，下面取 BuiltinConfig.text() 时才带得上
     MySitesStore.init(ctx);
     const setText = FileStore.readText(ctx, F_SET);
@@ -86,7 +96,7 @@ export class ConfigStore {
         ? BuiltinConfig.text() : cached;
       ConfigStore.applyText(effective);
       ConfigStore.pickSite(st.siteKey);
-      // 旧设置里记的站点 key 在新配置中已不存在，
+      // 旧设置里记的站点 key 在新配置中已不存在（例如被删掉的 ffzy），
       // pickSite 已回落到第一个可用站点，把设置文件里的旧 key 一并洗掉。
       if (AppState.currentSite !== null && AppState.currentSite.key !== (st.siteKey ?? '')) {
         ConfigStore.writeSettings(ctx, AppState.currentSite.key, AppState.repoName);

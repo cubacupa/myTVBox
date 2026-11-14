@@ -16,6 +16,13 @@ export interface VodItem {
   // 之前没声明导致被丢弃。豆瓣 ID 覆盖率约 88%，评分覆盖率约 23%（新片未开分）。
   vod_douban_id?: string | number;
   vod_douban_score?: string | number;
+  // 列表接口（ac=videolist）也会带这几个字段，主推位直接拿来做简介，
+  // 不用为了几行字再请求一次详情
+  vod_content?: string;
+  vod_area?: string;
+  vod_lang?: string;
+  vod_actor?: string;
+  vod_director?: string;
 }
 
 // 详情（含简介与播放地址）

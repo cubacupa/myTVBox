@@ -6,7 +6,7 @@ import { LiveGroup, LiveChannel } from '../utils/LiveApi';
 import { LiveSrcProbe } from '../utils/LiveSrcProbe';
 import { LiveMarkStore, LiveFav } from '../utils/LiveMarkStore';
 import { LiveCfg } from '../model/TvBoxModels';
-import { TopBar } from '../components/TopBar';
+import { SideNav } from '../components/SideNav';
 
 /**
  * 直播页：解析配置里的 lives（txt 频道表 / m3u 播放列表），左侧分组、右侧频道。
@@ -45,6 +45,8 @@ struct Live {
   /** 收藏 / 已点过的地址快照，用于渲染与判断（Store 里也有一份，避免每次读文件） */
   @State favUrls: string[] = [];
   @State seenUrls: string[] = [];
+  /** 遥控器焦点标记（自绘焦点态） */
+  @State focusId: string = '';
   /** 刚点过星标的时间戳：GridItem 的 onClick 会跟着触发，用它挡掉"收藏顺手把片子打开" */
   private lastStarTs: number = 0;
   private ctx: common.Context | null = null;
@@ -164,6 +166,7 @@ struct Live {
       out.push(g);
     }
     this.uiGroups = out;
+    setTimeout(() => { this.getUIContext().getFocusController().requestFocus('live-ch-0'); }, 400);
     let next: number = 0;
     if (keepName.length > 0) {
       for (let i = 0; i < out.length; i++) {
@@ -323,198 +326,370 @@ struct Live {
     this.refreshMarks();
   }
 
-  build() {
-    Column() {
-      TopBar({ active: 1 })
-      // 顶部工具行常驻：右侧「★ 收藏」只读本机收藏文件，
-      // 直播源加载中 / 解析失败 / 压根没有源，都不影响它显示和点开。
-      Row() {
-        // 直播源切换：只列探活通过的源。只剩一个能用时整条切换栏不渲染，
-        // 免得一个孤零零的按钮占着位置还让用户以为「是不是还有别的源」
-        if (this.okLives.length > 1) {
-          List({ space: 10 }) {
-            ForEach(this.okLives, (l: LiveCfg, idx: number) => {
-              ListItem() {
-                Text(l.name)
-                  .fontSize(15)
-                  .fontColor(idx === this.liveIdx ? '#ffffff' : '#cccccc')
-                  .backgroundColor(idx === this.liveIdx ? '#FF6B00' : '#2a2a2a')
-                  .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-                  .borderRadius(6)
-                  .focusable(true)
-                  .onClick(() => { this.loadLive(idx); })
-              }
-            }, (l: LiveCfg, idx: number) => l.name + String(idx))
-          }
-          .listDirection(Axis.Horizontal)
-          .height(58)
-          .layoutWeight(1)
-          .scrollBar(BarState.Off)
-        } else {
-          Blank()
-        }
+  /** 频道台标文字：中文取首字，英文数字连取两位（CCTV-1 → CC） */
+  private logoText(ch: LiveChannel): string {
+    const n: string = ch.name.trim();
+    if (n.length === 0) {
+      return '·';
+    }
+    const first: string = n.substring(0, 1);
+    if (/[A-Za-z0-9]/.test(first)) {
+      return n.length >= 2 ? n.substring(0, 2).toUpperCase() : first.toUpperCase();
+    }
+    return first;
+  }
 
-        // 收藏按钮和「清除已看标记」并排放在右侧。看收藏时左侧分组栏照常保留，
-        // 点任意分组就回到该直播源的频道列表，不用非得再点一次收藏按钮。
-        Text('★ 收藏' + (this.favUrls.length > 0 ? ' (' + this.favUrls.length + ')' : ''))
-          .fontSize(14)
-          .fontColor(this.showFav ? '#ffffff' : '#FFB300')
-          .backgroundColor(this.showFav ? '#FF6B00' : '#2f2a22')
-          .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-          .borderRadius(6)
-          .focusable(true)
-          .onClick(() => {
-            this.showFav = !this.showFav;
-            this.tip = '';
-          })
+  /** 台标底色：按频道名散列取一个稳定色，同名永远同色 */
+  private logoColor(ch: LiveChannel): string {
+    const palette: string[] = [
+      '#D8443C', '#2F6FD0', '#D9861F', '#12A38F',
+      '#7A4CD9', '#3B9A4E', '#C4417A', '#4A6FA5'
+    ];
+    let h: number = 0;
+    for (let i = 0; i < ch.name.length; i++) {
+      h = (h * 31 + ch.name.charCodeAt(i)) % 9973;
+    }
+    return palette[h % palette.length];
+  }
 
-        if (this.seenUrls.length > 0) {
-          Text('清除已看标记')
-            .fontSize(13)
-            .fontColor('#9aa9b8')
-            .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-            .backgroundColor('#2f2f2f')
-            .borderRadius(6)
-            .margin({ left: 10 })
-            .focusable(true)
-            .onClick(() => { this.clearSeen(); })
-        }
+  private subTitle(): string {
+    const n: number = this.curChannels().length;
+    if (this.showFav) {
+      return '收藏频道 ' + n.toString() + ' 个 · 存在本机，与直播源无关';
+    }
+    const g: string = this.curGroupName();
+    const head: string = g.length > 0 ? g + ' · ' : '';
+    return head + n.toString() + ' 个频道'
+      + (this.hiddenCount > 0 ? ' · 已隐藏 ' + this.hiddenCount.toString() + ' 个空源' : '');
+  }
+
+  @Builder
+  topChip(label: string, on: boolean, urlKey: string, onTap: () => void) {
+    Row() {
+      Text(label)
+        .fontSize(13.5)
+        .fontWeight(on ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(on ? '#150A04' : '#B9B9C6')
+        .maxLines(1)
+    }
+    .height(42)
+    .padding({ left: 18, right: 18 })
+    .borderRadius(21)
+    .backgroundColor(on ? '#FF8A3D' : '#10FFFFFF')
+    .border({ width: 1, color: this.focusId === urlKey ? '#FFD9BC' : (on ? '#FF8A3D' : '#1AFFFFFF') })
+    .focusable(true)
+    .onFocus(() => { this.focusId = urlKey; })
+    .onBlur(() => { this.focusId = ''; })
+    .onClick(onTap)
+  }
+
+  @Builder
+  groupRow(g: LiveGroup, idx: number) {
+    Row() {
+      // 当前分组用一根橙色竖条标记，不再给整行套一圈边框：
+      // 一列行都描边时，被染色的那一圈看着就像多出来的「当前选框」
+      Row()
+        .width(3)
+        .height(22)
+        .borderRadius(2)
+        .backgroundColor(!this.showFav && idx === this.groupIdx ? '#FF8A3D' : Color.Transparent)
+        .margin({ right: 11 })
+
+      Column({ space: 3 }) {
+        Text(g.name)
+          .fontSize(14.5)
+          .fontWeight(!this.showFav && idx === this.groupIdx ? FontWeight.Medium : FontWeight.Normal)
+          .fontColor(!this.showFav && idx === this.groupIdx ? '#FFB37A' : '#C9C9D4')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        Text(g.channels.length.toString() + ' 个频道')
+          .fontSize(11.5)
+          .fontColor(!this.showFav && idx === this.groupIdx ? '#A97C5E' : '#6E6E7A')
+          .width('100%')
       }
-      .width('100%')
-      .padding({ left: 28, right: 28, top: 4 })
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .padding({ left: 12, right: 14, top: 12, bottom: 12 })
+    .borderRadius(12)
+    // 和频道卡同一套焦点语言：只提亮底色、不画框，当前分组另靠竖条 + 文字颜色
+    .backgroundColor(!this.showFav && idx === this.groupIdx
+      ? (this.focusId === ('g-' + idx) ? '#2BFF8A3D' : '#1FFF8A3D')
+      : (this.focusId === ('g-' + idx) ? '#1AFFFFFF' : '#0AFFFFFF'))
+    .focusable(true)
+    .onFocus(() => { this.focusId = 'g-' + idx; })
+    .onBlur(() => { this.focusId = ''; })
+    .onClick(() => {
+      this.groupIdx = idx;
+      this.showFav = false;
+      this.tip = '';
+    })
+  }
 
-      if (this.lives.length === 0 && this.favUrls.length === 0 && !this.showFav) {
+  @Builder
+  channelCard(ch: LiveChannel, idx: number) {
+    Row({ space: 11 }) {
+      // 台标：多数 txt 源没有 logo，用首字色块代替，比空白或破图强
+      Stack() {
+        Row()
+          .width(42)
+          .height(42)
+          .borderRadius(12)
+          .backgroundColor(this.logoColor(ch))
+        Text(this.logoText(ch))
+          .fontSize(this.logoText(ch).length > 1 ? 15 : 19)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#FFFFFF')
+      }
+      .width(42)
+      .height(42)
+
+      Column({ space: 4 }) {
+        Text(ch.name)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.isSeen(ch) ? '#8A867E' : '#EDEDF2')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        Text(ch.lines.length > 1 ? ch.lines.length.toString() + ' 条线路' : '单线路')
+          .fontSize(11.5)
+          .fontColor(this.isSeen(ch) ? '#5C5A55' : '#7E7E8A')
+          .width('100%')
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+
+      Text(this.isFav(ch) ? '★' : '☆')
+        .fontSize(15)
+        .fontColor(this.isFav(ch) ? '#FFB300' : '#5F5F6B')
+        .padding({ left: 4, right: 8, top: 6, bottom: 6 })
+        .onClick(() => { this.toggleFav(ch); })
+    }
+    .width('100%')
+    .height(82)
+    .padding({ left: 14, right: 8 })
+    .borderRadius(16)
+    // 焦点只做「底色提亮 + 微微浮起」：原来那圈白边和橙色辉光像在宣告
+    // 「这张是当前播放」，其实只是光标停在这儿
+    .backgroundColor(this.focusId === ('c-' + idx) ? '#26FFFFFF' : '#0DFFFFFF')
+    .scale({ x: this.focusId === ('c-' + idx) ? 1.015 : 1, y: this.focusId === ('c-' + idx) ? 1.015 : 1 })
+    .animation({ duration: 140 })
+    .id('live-ch-' + idx)
+    .focusable(true)
+    .defaultFocus(idx === 0)
+    .onFocus(() => { this.focusId = 'c-' + idx; })
+    .onBlur(() => { this.focusId = ''; })
+    .onClick(() => { this.play(ch); })
+  }
+
+  build() {
+    Row() {
+      SideNav({ active: 2, siteName: AppState.configName })
+      Stack({ alignContent: Alignment.TopStart }) {
+        // 背景：冷蓝氛围光 + 深色底
+        Column()
+          .width('100%')
+          .height('100%')
+          .linearGradient({
+            angle: 150,
+            colors: [['#0C1226', 0.0], ['#08090B', 0.62], ['#08090B', 1.0]]
+          })
+        Column()
+          .width(1100)
+          .height(700)
+          .borderRadius(550)
+          .linearGradient({
+            angle: 120,
+            colors: [['#332A46FF', 0.0], ['#0A1A2AFF', 0.6], ['#00000000', 1.0]]
+          })
+          .blur(60)
+          .margin({ left: 1100, top: -260 })
+
         Column() {
-          Text('没有直播源').fontSize(22).fontColor('#dddddd')
-          Text('设置页 → 直播源：单独填一个 m3u / txt 直链，或载入一份带 lives 的配置')
-            .fontSize(15).fontColor('#888888')
-            .margin({ top: 12 })
-          Button('去设置').margin({ top: 26 })
-            .onClick(() => { router.replaceUrl({ url: 'pages/Settings' }); })
+          // ---- 标题行 ----
+          Row() {
+            Row({ space: 12 }) {
+              Text('直播')
+                .fontSize(34)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
+              // 与点播/设置同一套：标题右侧接一行小字，不再另起一行
+              Text(this.subTitle())
+                .fontSize(12.5)
+                .fontColor('#7E7E8A')
+            }
+            .alignItems(VerticalAlign.Center)
+
+            Blank()
+
+            // 直播源切换（只有多个可用源时才出现）
+            if (this.okLives.length > 1) {
+              Row({ space: 8 }) {
+                ForEach(this.okLives, (l: LiveCfg, idx: number) => {
+                  this.topChip(l.name, idx === this.liveIdx, 'src-' + idx, () => { this.loadLive(idx); })
+                }, (l: LiveCfg, idx: number) => l.name + String(idx))
+              }
+              .margin({ right: 12 })
+            }
+
+            // 「收藏」和「清除已看」原来直接相邻，两个胶囊边贴边，看着像粘在一起
+            Row({ space: 10 }) {
+              this.topChip(this.favUrls.length > 0 ? '★ 收藏 ' + this.favUrls.length.toString() : '☆ 收藏',
+                this.showFav, 'favbtn', () => {
+                  this.showFav = !this.showFav;
+                  this.tip = '';
+                })
+
+              if (this.seenUrls.length > 0 && !this.showFav) {
+                this.topChip('清除已看', false, 'clear', () => { this.clearSeen(); })
+              }
+            }
+          }
+          .width('100%')
+          .height(56)
+          .alignItems(VerticalAlign.Center)
+          .margin({ top: 26 })
+
+          // ---- 主体 ----
+          if (this.lives.length === 0 && this.favUrls.length === 0 && !this.showFav) {
+            Column({ space: 14 }) {
+              Text('没有直播源')
+                .fontSize(24)
+                .fontColor('#EDEDF2')
+              Text('去设置里单独填一个 m3u / txt 直链，或载入一份带直播源的配置')
+                .fontSize(14)
+                .fontColor('#8E8E9A')
+              Text('打开设置')
+                .fontSize(16)
+                .fontColor('#150A04')
+                .height(50)
+                .padding({ left: 30, right: 30 })
+                .borderRadius(25)
+                .backgroundColor('#FF8A3D')
+                .textAlign(TextAlign.Center)
+                .margin({ top: 10 })
+                .focusable(true)
+                .onClick(() => { router.replaceUrl({ url: 'pages/Settings' }).catch(() => {}); })
+            }
+            .width('100%')
+            .layoutWeight(1)
+            .justifyContent(FlexAlign.Center)
+          } else if (!this.showFav && this.loading) {
+            Column({ space: 12 }) {
+              LoadingProgress().width(46).height(46).color('#FF8A3D')
+              Text(this.probeTip.length > 0 ? this.probeTip : '正在加载直播源…')
+                .fontSize(13.5)
+                .fontColor('#8E8E9A')
+            }
+            .width('100%')
+            .layoutWeight(1)
+            .justifyContent(FlexAlign.Center)
+          } else if (!this.showFav && this.err.length > 0) {
+            Column({ space: 18 }) {
+              Text(this.err)
+                .fontSize(15)
+                .fontColor('#FF8B7A')
+                .textAlign(TextAlign.Center)
+                .width(900)
+              Text('重试')
+                .fontSize(16)
+                .fontColor('#EDEDF2')
+                .height(50)
+                .padding({ left: 32, right: 32 })
+                .borderRadius(25)
+                .backgroundColor('#16FFFFFF')
+                .textAlign(TextAlign.Center)
+                .focusable(true)
+                .onClick(() => {
+                  LiveSrcProbe.reset();
+                  if (this.okLives.length > 0) {
+                    this.loadLive(this.liveIdx);
+                  } else {
+                    this.openFirstGood();
+                  }
+                })
+            }
+            .width('100%')
+            .layoutWeight(1)
+            .justifyContent(FlexAlign.Center)
+          } else {
+            Row() {
+              // 左侧分组
+              Column() {
+                Text('分组')
+                  .fontSize(12)
+                  .fontColor('#6E6E7A')
+                  .width('100%')
+                  .margin({ bottom: 10, left: 6 })
+                List({ space: 8 }) {
+                  ForEach(this.uiGroups, (g: LiveGroup, idx: number) => {
+                    ListItem() {
+                      this.groupRow(g, idx)
+                    }
+                  }, (g: LiveGroup, idx: number) => g.name + String(idx))
+                }
+                .width('100%')
+                .layoutWeight(1)
+                .scrollBar(BarState.Off)
+              }
+              .width(196)
+              .height('100%')
+              .alignItems(HorizontalAlign.Start)
+
+              // 右侧频道
+              Column() {
+                if (this.tip.length > 0) {
+                  Text(this.tip)
+                    .fontSize(12.5)
+                    .fontColor('#FFB37A')
+                    .width('100%')
+                    .margin({ bottom: 10, left: 4 })
+                }
+                if (this.curChannels().length === 0) {
+                  Text(this.showFav ? '还没有收藏频道。在频道卡片右侧点 ☆ 就能收藏' : '这个分组里没有频道')
+                    .fontSize(14)
+                    .fontColor('#7E7E8A')
+                    .margin({ top: 40 })
+                } else {
+                  Grid() {
+                    ForEach(this.curChannels(), (ch: LiveChannel, idx: number) => {
+                      GridItem() {
+                        this.channelCard(ch, idx)
+                      }
+                    }, (ch: LiveChannel, idx: number) => ch.name + String(idx) + ch.url)
+                  }
+                  .columnsTemplate('1fr 1fr 1fr')
+                  .columnsGap(14)
+                  .rowsGap(14)
+                  .width('100%')
+                  .layoutWeight(1)
+                  .scrollBar(BarState.Off)
+                }
+              }
+              .layoutWeight(1)
+              .height('100%')
+              .alignItems(HorizontalAlign.Start)
+              .margin({ left: 28 })
+            }
+            .width('100%')
+            .layoutWeight(1)
+            .alignItems(VerticalAlign.Top)
+            .margin({ top: 26 })
+          }
         }
         .width('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Center)
-      } else {
-        if (!this.showFav && this.loading) {
-          Column() {
-            LoadingProgress().width(48).height(48)
-            Text(this.probeTip.length > 0 ? this.probeTip : '正在加载直播源…')
-              .fontSize(14).fontColor('#999999').margin({ top: 10 })
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .justifyContent(FlexAlign.Center)
-        } else if (!this.showFav && this.err) {
-          Column() {
-            Text(this.err).fontSize(16).fontColor('#ff7777')
-            Button('重试').margin({ top: 18 }).onClick(() => {
-              // 清掉失败缓存再试：可能是网络临时抽了，别让一次失败锁死这次运行
-              LiveSrcProbe.reset();
-              if (this.okLives.length > 0) {
-                this.loadLive(this.liveIdx);
-              } else {
-                this.openFirstGood();
-              }
-            })
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .justifyContent(FlexAlign.Center)
-        } else {
-          Row() {
-            // 左侧分组常驻：看收藏时也能点任意分组回到直播频道，
-            // 只是此刻没有「当前分组」，所以不高亮任何一项
-            List({ space: 8 }) {
-              ForEach(this.uiGroups, (g: LiveGroup, idx: number) => {
-                ListItem() {
-                  Text(g.name + ' (' + g.channels.length + ')')
-                    .fontSize(14)
-                    .fontColor(!this.showFav && idx === this.groupIdx ? '#FF6B00' : '#cccccc')
-                    .width('100%')
-                    .padding({ left: 14, right: 14, top: 11, bottom: 11 })
-                    .backgroundColor(!this.showFav && idx === this.groupIdx ? '#2f2a22' : '#202020')
-                    .borderRadius(6)
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .focusable(true)
-                    .onClick(() => {
-                      this.groupIdx = idx;
-                      this.showFav = false;
-                      this.tip = '';
-                    })
-                }
-              }, (g: LiveGroup, idx: number) => g.name + String(idx))
-            }
-            .width(210)
-            .height('100%')
-            .padding({ left: 24, right: 10 })
-            .scrollBar(BarState.Off)
-
-            Column() {
-              Text(this.infoText())
-                .fontSize(12).fontColor(this.tip.length > 0 ? '#FF9F45' : '#777777')
-                .width('100%').margin({ bottom: 8 })
-
-              Grid() {
-                ForEach(this.curChannels(), (ch: LiveChannel, idx: number) => {
-                  GridItem() {
-                    Stack({ alignContent: Alignment.TopEnd }) {
-                      // 已点过 → 整格压暗；未点过保持正常亮度
-                      Column() {
-                        Text(ch.name)
-                          .fontSize(15)
-                          .fontColor(this.isSeen(ch) ? '#6d675f' : '#dddddd')
-                          .maxLines(1)
-                          .textOverflow({ overflow: TextOverflow.Ellipsis })
-                          .width('100%')
-                          .textAlign(TextAlign.Center)
-                        // 源站同一频道常给好几条地址，合并后在这里标出线路数，
-                        // 点进去会用「上次能放的」那条，放不出来还能在播放页换
-                        if (ch.lines.length > 1) {
-                          Text(ch.lines.length + ' 条线路')
-                            .fontSize(11)
-                            .fontColor(this.isSeen(ch) ? '#585349' : '#8a8a8a')
-                            .width('100%')
-                            .textAlign(TextAlign.Center)
-                            .margin({ top: 2 })
-                        }
-                      }
-                      .width('100%')
-                      .padding({ top: 13, bottom: 13, left: 30, right: 30 })
-                      .backgroundColor(this.isSeen(ch) ? '#1b1b1b' : '#262626')
-                      .borderRadius(6)
-
-                      Text(this.isFav(ch) ? '★' : '☆')
-                        .fontSize(15)
-                        .fontColor(this.isFav(ch) ? '#FFB300' : '#7a7a7a')
-                        .padding({ left: 8, right: 8, top: 5, bottom: 5 })
-                        .onClick(() => { this.toggleFav(ch); })
-                    }
-                    .width('100%')
-                    .focusable(true)
-                    .onClick(() => { this.play(ch); })
-                  }
-                }, (ch: LiveChannel, idx: number) => ch.name + String(idx) + ch.url)
-              }
-              .columnsTemplate('1fr 1fr 1fr 1fr')
-              .columnsGap(12)
-              .rowsGap(12)
-              .layoutWeight(1)
-              .width('100%')
-            }
-            .layoutWeight(1)
-            .height('100%')
-            .padding({ right: 28, top: 6, bottom: 16 })
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .alignItems(VerticalAlign.Top)
-        }
+        .height('100%')
+        .padding({ left: 48, right: 52, bottom: 26 })
+        .alignItems(HorizontalAlign.Start)
       }
+      .layoutWeight(1)
+      .height('100%')
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#161616')
+    .backgroundColor('#08090B')
   }
 }

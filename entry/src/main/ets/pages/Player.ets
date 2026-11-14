@@ -1541,6 +1541,15 @@ struct Player {
               .backgroundColor('#FF3B30')
               .padding({ left: 10, right: 10, top: 3, bottom: 3 })
               .borderRadius(4)
+          } else if (this.canSwitchEp()) {
+            // 多集时把集数亮出来：控制条上「上集 / 下集」只在有剧集信息时才画，
+            // 有了这个角标，一眼能看出当前片子到底有没有分集
+            Text('第 ' + (this.epIdx + 1) + '/' + this.epCount + ' 集')
+              .fontSize(13)
+              .fontColor('#FFD9BC')
+              .backgroundColor('#66000000')
+              .padding({ left: 10, right: 10, top: 3, bottom: 3 })
+              .borderRadius(4)
           }
         }
         .width('100%')

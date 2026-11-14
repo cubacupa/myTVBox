@@ -20,6 +20,13 @@ export interface VodListResult {
   items: VodItem[];
   page: number;
   pageCount: number;
+  /**
+   * 该分类**总共有多少部**（接口的 total 字段）。
+   * 必须用这个，不能用 items.length——列表是懒加载的，items 只是已加载的那几页，
+   * 界面上写「共 N 部」会随着下拉不断变大，纯属误导。
+   * 少数站点不返回 total（为 0），此时界面上不显示数量。
+   */
+  total: number;
 }
 
 export class SiteApi {
@@ -51,7 +58,8 @@ export class SiteApi {
     const r: VodListResult = {
       items: data.list ?? [],
       page: page,
-      pageCount: data.pagecount ?? 1
+      pageCount: data.pagecount ?? 1,
+      total: data.total ?? 0
     };
     return r;
   }
@@ -62,7 +70,8 @@ export class SiteApi {
     const r: VodListResult = {
       items: data.list ?? [],
       page: page,
-      pageCount: data.pagecount ?? 1
+      pageCount: data.pagecount ?? 1,
+      total: data.total ?? 0
     };
     return r;
   }

@@ -10,7 +10,7 @@ import { PosterStore } from './PosterStore';
  *
  * 一级（零成本）：站点接口本身就带 vod_douban_score / vod_douban_id。
  *   实测 ac=videolist 与 ac=detail 返回同样的 85 个字段，所以列表页直接有分可显示。
- *   注意各站差别极大：有的站直接带分，有的只给豆瓣 ID、分全是 0。
+ *   注意各站差别极大：暴风带分，百度/虎牙基本只给 ID、分全是 0。
  *
  * 二级（后台补）：有 ID 但没有分数的，逐个查豆瓣。
  *
@@ -29,6 +29,7 @@ import { PosterStore } from './PosterStore';
 const TAG: string = 'RatingStore';
 const DOMAIN: number = 0x0001;
 const FILE: string = 'tvbox_ratings.json';
+const META_FILE: string = 'tvbox_meta.txt';
 const TICK_KEY: string = 'ratingTick';
 /** rexxar 详情（顺带拿海报）的间隔：这个接口限流最狠，只能慢慢来 */
 const GAP_MS: number = 6000;
@@ -59,6 +60,19 @@ interface DoubanSubject {
   type?: string;
   rating?: DoubanRating;
   pic?: DoubanPic;
+  /** 豆瓣类型标签，如 ["悬疑","犯罪","剧情"]；比采集站的「欧美动漫」有用得多 */
+  genres?: string[];
+  /** 片长，如 ["120分钟"]；剧集是单集时长 */
+  durations?: string[];
+  /** 制片地区，如 ["美国"] */
+  countries?: string[];
+}
+
+/** 详情页要展示的豆瓣元信息（类型 / 片长 / 地区），单独缓存 */
+export class DoubanMeta {
+  genres: string[] = [];
+  durations: string[] = [];
+  countries: string[] = [];
 }
 
 /** movie.douban.com/j/subject_abstract 的返回（rate 是字符串，可能为空串） */
@@ -77,6 +91,8 @@ interface AbstractResp {
 export class RatingStore {
   private static ctx: common.Context | null = null;
   private static scores: Map<string, number> = new Map<string, number>();
+  /** 豆瓣元信息缓存：id → 类型 / 片长 / 地区 */
+  private static metas: Map<string, DoubanMeta> = new Map<string, DoubanMeta>();
   private static tried: Map<string, number> = new Map<string, number>();
   private static queue: string[] = [];
   private static timer: number = -1;
@@ -125,6 +141,7 @@ export class RatingStore {
     }
     RatingStore.tick = 0;
     AppStorage.setOrCreate(TICK_KEY, 0);
+    RatingStore.loadMeta(ctx);
     // 按名搜索命中时 PosterStore 会把豆瓣分回填过来。
     // 用回调注入：本类已经 import 了 PosterStore，反向 import 会形成循环依赖。
     PosterStore.onSuggestHit = (nameKey: string, score: number): void => {
@@ -221,6 +238,106 @@ export class RatingStore {
       return '';
     }
     return v.toFixed(1);
+  }
+
+  // ---------------- 豆瓣元信息：类型 / 片长 / 地区 ----------------
+
+  /**
+   * 缓存格式：一行一条，字段用 \t 分，数组用 | 分
+   *   id \t 悬疑|犯罪 \t 120分钟 \t 美国
+   * 不用 JSON 是为了绕开 ArkTS 的对象索引限制，读写都更省事。
+   */
+  private static loadMeta(ctx: common.Context): void {
+    RatingStore.metas.clear();
+    const raw: string = FileStore.readText(ctx, META_FILE);
+    if (raw.length === 0) {
+      return;
+    }
+    const lines: string[] = raw.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i].trim();
+      if (line.length === 0) {
+        continue;
+      }
+      const cols: string[] = line.split('\t');
+      if (cols.length < 2) {
+        continue;
+      }
+      const m: DoubanMeta = new DoubanMeta();
+      m.genres = RatingStore.splitPipes(cols.length > 1 ? cols[1] : '');
+      m.durations = RatingStore.splitPipes(cols.length > 2 ? cols[2] : '');
+      m.countries = RatingStore.splitPipes(cols.length > 3 ? cols[3] : '');
+      RatingStore.metas.set(cols[0], m);
+    }
+    hilog.info(DOMAIN, TAG, 'meta cache: %{public}d entries', RatingStore.metas.size);
+  }
+
+  private static splitPipes(s: string): string[] {
+    const out: string[] = [];
+    if (s.length === 0) {
+      return out;
+    }
+    const arr: string[] = s.split('|');
+    for (let i = 0; i < arr.length; i++) {
+      const v: string = arr[i].trim();
+      if (v.length > 0) {
+        out.push(v);
+      }
+    }
+    return out;
+  }
+
+  /** 只读缓存、不发请求：首页 hero 换片频繁，每次打豆瓣会被限流锁死 */
+  static metaCached(id: string): DoubanMeta | null {
+    const m: DoubanMeta | undefined = RatingStore.metas.get(id);
+    return m === undefined ? null : m;
+  }
+
+  /** 有缓存直接给，没有就请求一次 rexxar 详情（详情页只有一部片，等得起） */
+  static async ensureMeta(id: string): Promise<DoubanMeta | null> {
+    if (id.length === 0) {
+      return null;
+    }
+    const c: DoubanMeta | undefined = RatingStore.metas.get(id);
+    if (c !== undefined) {
+      return c;
+    }
+    try {
+      const d: DoubanSubject = await RatingStore.detail(id);
+      const m: DoubanMeta = new DoubanMeta();
+      if (d.genres !== undefined) {
+        m.genres = d.genres;
+      }
+      if (d.durations !== undefined) {
+        m.durations = d.durations;
+      }
+      if (d.countries !== undefined) {
+        m.countries = d.countries;
+      }
+      if (m.genres.length === 0 && m.durations.length === 0 && m.countries.length === 0) {
+        return null;
+      }
+      RatingStore.metas.set(id, m);
+      RatingStore.saveMeta();
+      hilog.info(DOMAIN, TAG, 'meta ok %{public}s: %{public}s', id, m.genres.join('/'));
+      return m;
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'meta fail %{public}s: %{public}s', id, (e as Error).message);
+      return null;
+    }
+  }
+
+  private static saveMeta(): void {
+    const ctx: common.Context | null = RatingStore.ctx;
+    if (ctx === null || RatingStore.metas.size === 0) {
+      return;
+    }
+    const lines: string[] = [];
+    RatingStore.metas.forEach((m: DoubanMeta, k: string) => {
+      lines.push(k + '\t' + m.genres.join('|') + '\t'
+        + m.durations.join('|') + '\t' + m.countries.join('|'));
+    });
+    FileStore.writeText(ctx, META_FILE, lines.join('\n'));
   }
 
   /**
