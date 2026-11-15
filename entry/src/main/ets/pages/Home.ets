@@ -15,7 +15,7 @@ import { PinStore } from '../utils/PinStore';
 import { SideNav } from '../components/SideNav';
 
 /**
- * 影视盒 · 现代版首页
+ * 影视盒 · 首页
  *
  * 版式基准：1280×720 vp（4K 屏 density 3）。
  *
@@ -23,7 +23,6 @@ import { SideNav } from '../components/SideNav';
  *   0) 随机推荐 20 部（各分类轮流抽）—— 同时也是主推位的「换片开关」
  *   1) 我的收藏（可能空）
  *   2) 继续观看 = 播放历史（可能空）
- *   3) 分类片单：第一个分类 → 第二个分类 → …
  *
  * 主推位固定就是「随机推荐」里当前选中的那一部：进页面随机，点下方缩略图直接换。
  *   缩略图点击 = 换主推，不进详情（详情从「播放」按钮进），这样整行都是翻页键。
@@ -37,14 +36,9 @@ import { SideNav } from '../components/SideNav';
  * 文字又永远有底，比整屏加黑纱耐看。注意别换回 backgroundBlurStyle：
  * COMPONENT_THICK 在电视上会把材质底色和模糊结果糊成一整块死色，看着就是灰板子。
  *
- * 完整海报墙：分类行右侧「查看全部 ›」→ pages/Index，并自动停在对应分类；
- * 收藏 / 历史行的「查看全部 ›」→ pages/My / pages/History。
+ * 收藏 / 历史是本机全量记录，横向 List 直接铺完、可以一直滑到底，
+ * 所以这两行不再放「查看全部」（原来截断 14 部时才需要那个入口）。
  */
-const ROW_MAX: number = 14;
-/** 最多几行分类片单（收藏 / 历史不算在内） */
-const CLASS_ROW_MAX: number = 4;
-/** 最多尝试几个分类去凑够这些行 */
-const CLASS_TRY_MAX: number = 8;
 /** 随机推荐凑几部（这一行同时是主推位的候选池） */
 const HERO_MAX: number = 20;
 /** 加载骨架画几张空卡：和首屏能露出的张数差不多，多了也没人看见 */
@@ -84,7 +78,6 @@ const PICK_BAD_TITLE: string[] = [
 /** 一行的来源类型 */
 const K_FAV: string = 'fav';
 const K_HIS: string = 'his';
-const K_CLS: string = 'cls';
 
 /** 主推位条目 */
 interface HeroItem {
@@ -104,13 +97,11 @@ interface HeroItem {
   area: string;
 }
 
-/** 一行片单：收藏 / 历史用 marks，分类用 items */
+/** 一行片单：收藏 / 历史的本机记录 */
 interface Shelf {
   kind: string;
   title: string;
-  typeId: string;
   marks: VodMark[];
-  items: VodItem[];
 }
 
 /** 随机推荐批次的存放键（AppStorage，应用级） */
@@ -182,6 +173,7 @@ struct Home {
   private async boot(): Promise<void> {
     this.loading = true;
     const ctx = getContext(this) as common.Context;
+    // 开源版不做首启预置：PIN 与豆瓣登录态都由用户自己设置。
     this.pin = PinStore.get(ctx);
     HttpUtil.init(ctx);
     DoubanAuth.init(ctx);
@@ -268,23 +260,6 @@ struct Home {
     return RatingStore.label(probe);
   }
 
-  private heroFromMark(m: VodMark, badge: string): HeroItem {
-    return {
-      siteKey: m.siteKey,
-      vodId: m.vodId,
-      name: m.name,
-      pic: this.picOfMark(m),
-      remarks: m.remarks,
-      typeName: m.typeName === undefined ? '' : m.typeName,
-      year: '',
-      score: this.scoreOfMark(m),
-      doubanId: '',
-      badge: badge,
-      content: '',
-      area: ''
-    };
-  }
-
   private heroFromItem(it: VodItem, siteKey: string, badge: string): HeroItem {
     const raw: string | number | undefined = it.vod_douban_id;
     const did: string = raw === undefined || raw === null ? '' : raw.toString().trim();
@@ -302,32 +277,6 @@ struct Home {
       content: this.plotOf(it.vod_content),
       area: it.vod_area === undefined ? '' : it.vod_area
     };
-  }
-
-  /**
-   * 一级分类排序：名字带「电影」的排前面，其余保持站点原顺序。
-   * 有的站第一个分类是连续剧，直接按站点顺序会把剧集顶成主推位，
-   * 而横版剧照 / 简介这些在电影条目上更完整，所以先把电影类拎到最前。
-   */
-  private orderClasses(pool: VodClass[]): VodClass[] {
-    const movies: VodClass[] = [];
-    const others: VodClass[] = [];
-    for (const c of pool) {
-      const n: string = c.type_name === undefined ? '' : c.type_name;
-      if (n.indexOf('电影') >= 0 && n.indexOf('解说') < 0) {
-        movies.push(c);
-      } else {
-        others.push(c);
-      }
-    }
-    const out: VodClass[] = [];
-    for (const c of movies) {
-      out.push(c);
-    }
-    for (const c of others) {
-      out.push(c);
-    }
-    return out;
   }
 
   /** 某个一级分类下的二级分类 */
@@ -361,8 +310,8 @@ struct Home {
       const favs: VodMark[] = this.visibleMarks(MarkStore.listFav(ctx));
       if (favs.length > 0) {
         rows.push({
-          kind: K_FAV, title: '我的收藏', typeId: '',
-          marks: favs.slice(0, ROW_MAX), items: []
+          kind: K_FAV, title: '我的收藏',
+          marks: favs
         });
       }
 
@@ -370,14 +319,13 @@ struct Home {
       const his: VodMark[] = this.visibleMarks(MarkStore.listHistory(ctx));
       if (his.length > 0) {
         rows.push({
-          kind: K_HIS, title: '继续观看', typeId: '',
-          marks: his.slice(0, ROW_MAX), items: []
+          kind: K_HIS, title: '继续观看',
+          marks: his
         });
       }
 
       // ---- 3) 随机推荐 ----
-      // 首页不再有「电影片 / 连续剧」这种按分类铺的片单（用户明确要去掉），
-      // 但分类列表仍要拉：随机推荐那 20 部就是从这些分类里抽的。
+      // 首页只铺本机收藏 / 历史；分类列表仍要拉，随机推荐那 20 部就是从这些分类里抽的。
       this.shelves = rows;
       this.loading = false;
       try {
@@ -395,10 +343,10 @@ struct Home {
       // 推荐批次本进程只抽一次：有缓存就直接用，切页回来不会换片
       const cached: HeroItem[] | null = this.cachedPicks(site.key);
       if (cached !== null) {
-        console.info('[modern] picks cache HIT n=' + cached.length);
+        console.info('[home] picks cache HIT n=' + cached.length);
         this.useCached(cached);
       } else {
-        console.info('[modern] picks cache MISS');
+        console.info('[home] picks cache MISS');
         await this.repick(false);
       }
       if (seq !== this.loadSeq) {
@@ -408,7 +356,7 @@ struct Home {
         this.err = '当前接口没有返回任何内容，可以在设置里换个站点';
       }
       const h: HeroItem | null = this.hero();
-      console.info('[modern] rows=' + rows.length + ' picks=' + this.heroes.length
+      console.info('[home] rows=' + rows.length + ' picks=' + this.heroes.length
         + ' hero=' + (h === null ? '-' : h.name));
     } catch (e) {
       if (seq === this.loadSeq) {
@@ -555,7 +503,7 @@ struct Home {
         }
       }
       RatingStore.warm(warm);
-      console.info('[modern] picks=' + this.heroes.length + ' groups=' + groups.length);
+      console.info('[home] picks=' + this.heroes.length + ' groups=' + groups.length);
     } finally {
       this.picking = false;
     }
@@ -841,14 +789,6 @@ struct Home {
     return RatingStore.label(item);
   }
 
-  private siteKeyOf(item: VodItem): string {
-    if (item.site_key !== undefined && item.site_key.length > 0) {
-      return item.site_key;
-    }
-    const s = AppState.currentSite;
-    return s === null ? '' : s.key;
-  }
-
   private metaOf(h: HeroItem): string {
     const parts: string[] = [];
     if (h.year.length > 0) {
@@ -906,22 +846,6 @@ struct Home {
 
   private goMark(m: VodMark): void {
     this.goDetail(m.siteKey, m.vodId);
-  }
-
-  /** 进完整海报墙，并自动停在对应分类 */
-  private goLibrary(typeId: string, title: string): void {
-    router.pushUrl({
-      url: 'pages/Index',
-      params: { typeId: typeId, typeName: title }
-    }).catch(() => {});
-  }
-
-  private goFav(): void {
-    router.pushUrl({ url: 'pages/My' }).catch(() => {});
-  }
-
-  private goHis(): void {
-    router.pushUrl({ url: 'pages/History' }).catch(() => {});
   }
 
   private toggleHeroFav(): void {
@@ -1063,7 +987,8 @@ struct Home {
     .backgroundColor('#3D0B0A0C')
     .border({ width: 1, color: '#2EFFFFFF' })
     .shadow({ radius: 40, color: '#4D000000', offsetX: 0, offsetY: 14 })
-    .margin({ left: 40, bottom: 22 })
+    // 左沿和下面「随机推荐」/收藏行对齐到同一条 x=56 的基准线，别再往里缩 40
+    .margin({ bottom: 22 })
   }
 
   /** 随机推荐的一张骨架：132×198 与真卡片同宽同高，整行高度固定 244 */
@@ -1239,7 +1164,8 @@ struct Home {
     .border({ width: 1, color: '#2EFFFFFF' })
     .shadow({ radius: 40, color: '#4D000000', offsetX: 0, offsetY: 14 })
     // 面板底沿和下一行「随机推荐」之间必须留气口，原来只差 6，亮图上看着像粘住了
-    .margin({ left: 40, bottom: 22 })
+    // 左沿和下面「随机推荐」/收藏行对齐到同一条 x=56 的基准线，别再往里缩 40
+    .margin({ bottom: 22 })
   }
 
   /** 随机推荐行标题：左边名字，右边「换一批」 */
@@ -1372,7 +1298,7 @@ struct Home {
     })
   }
 
-  /** 行标题：左名，右「查看全部」 */
+  /** 行标题：收藏 / 历史都铺全量，右侧不再需要「查看全部」 */
   @Builder
   sectionTitle(s: Shelf) {
     Row() {
@@ -1380,35 +1306,9 @@ struct Home {
         .fontSize(21)
         .fontWeight(FontWeight.Bold)
         .fontColor('#FFFFFF')
-      Blank()
-      Row({ space: 5 }) {
-        Text('查看全部')
-          .fontSize(13)
-          .fontColor(this.hot('all-' + s.title) ? '#FFB37A' : '#8E8E9A')
-        SymbolGlyph($r('sys.symbol.chevron_right'))
-          .fontSize(12)
-          .fontColor([this.hot('all-' + s.title) ? '#FFB37A' : '#8E8E9A'])
-          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-      }
-      .height(30)
-      .padding({ left: 12, right: 8 })
-      .borderRadius(10)
-      .backgroundColor(this.hot('all-' + s.title) ? '#14FFFFFF' : Color.Transparent)
-      .focusable(true)
-      .onFocus(() => { this.focusId = 'all-' + s.title; })
-      .onBlur(() => { this.clearHot('all-' + s.title); })
-      .onHover((isHover: boolean) => { this.hoverId = isHover ? 'all-' + s.title : ''; })
-      .onClick(() => {
-        if (s.kind === K_FAV) {
-          this.goFav();
-        } else if (s.kind === K_HIS) {
-          this.goHis();
-        } else {
-          this.goLibrary(s.typeId, s.title);
-        }
-      })
     }
     .width('100%')
+    .height(30)
     .padding({ right: 56 })
     .margin({ bottom: 12 })
   }
@@ -1489,79 +1389,6 @@ struct Home {
   }
 
   @Builder
-  filmCard(item: VodItem, rowIdx: number, colIdx: number) {
-    Column() {
-      Stack({ alignContent: Alignment.BottomStart }) {
-        Row()
-          .width(150)
-          .height(226)
-          .borderRadius(13)
-          .backgroundColor('#1A1B22')
-        if (this.picOf(item).length > 0) {
-          Image(this.picOf(item))
-            .width(150)
-            .height(226)
-            .objectFit(ImageFit.Cover)
-            .borderRadius(13)
-        }
-        Column()
-          .width(150)
-          .height(64)
-          .linearGradient({
-            angle: 180,
-            colors: [['#00000000', 0.0], ['#A6000000', 1.0]]
-          })
-        if (this.scoreOf(item).length > 0) {
-          Text(this.scoreOf(item))
-            .fontSize(11.5)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#FFD08A')
-            .backgroundColor('#B3000000')
-            .borderRadius(6)
-            .padding({ left: 6, right: 6, top: 3, bottom: 3 })
-            .margin({ left: 9, bottom: 9 })
-        }
-      }
-      .width(150)
-      .height(226)
-      .clip(true)
-      .borderRadius(13)
-      .border({
-        width: this.hot('f-' + rowIdx + '-' + colIdx) ? 2 : 1,
-        color: this.hot('f-' + rowIdx + '-' + colIdx) ? '#FFD9BC' : '#1AFFFFFF'
-      })
-      .shadow(this.hot('f-' + rowIdx + '-' + colIdx)
-        ? { radius: 26, color: '#59FF8A3D', offsetX: 0, offsetY: 0 }
-        : { radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
-      .scale({
-        x: this.hot('f-' + rowIdx + '-' + colIdx) ? 1.05 : 1,
-        y: this.hot('f-' + rowIdx + '-' + colIdx) ? 1.05 : 1
-      })
-      .animation({ duration: 130 })
-
-      Text(item.vod_name)
-        .fontSize(13.5)
-        .fontColor('#E4E4EC')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width(150)
-        .margin({ top: 9 })
-      Text(item.vod_remarks === undefined ? '' : item.vod_remarks)
-        .fontSize(11)
-        .fontColor('#8E8E9A')
-        .maxLines(1)
-        .width(150)
-        .margin({ top: 3 })
-    }
-    .width(150)
-    .focusable(true)
-    .onFocus(() => { this.focusId = 'f-' + rowIdx + '-' + colIdx; })
-    .onBlur(() => { this.clearHot('f-' + rowIdx + '-' + colIdx); })
-    .onHover((isHover: boolean) => { this.hoverId = isHover ? 'f-' + rowIdx + '-' + colIdx : ''; })
-    .onClick(() => { this.goDetail(this.siteKeyOf(item), item.vod_id.toString()); })
-  }
-
-  @Builder
   content() {
     Scroll() {
       Column() {
@@ -1612,18 +1439,11 @@ struct Home {
         .alignItems(HorizontalAlign.Start)
         .margin({ top: 10 })
 
-        // ---- 片单：收藏 → 继续观看 → 分类（空的整行不画） ----
+        // ---- 片单：收藏 → 继续观看（空的整行不画） ----
         ForEach(this.shelves, (s: Shelf, ri: number) => {
           Column() {
             this.sectionTitle(s)
             List({ space: 18 }) {
-              // 分类行只有 items，收藏/历史行只有 marks，两个数组互斥，
-              // 不用 if 包（List 的直接子节点必须是 ListItem）
-              ForEach(s.items, (it: VodItem, ci: number) => {
-                ListItem() {
-                  this.filmCard(it, ri, ci)
-                }
-              }, (it: VodItem) => 'i' + it.vod_id.toString())
               ForEach(s.marks, (m: VodMark, ci: number) => {
                 ListItem() {
                   this.markCard(m, ri, ci, s.kind === K_HIS)
@@ -1701,9 +1521,9 @@ struct Home {
         .zIndex(1)
 
       Row() {
-        SideNav({ active: 0, siteName: this.siteName })
+        SideNav({ active: 0 })
         // 必须 layoutWeight(1)：写 width('100%') 会按整个 Row 的宽度算，
-        // 再加上左边 88 的导航栏就顶出屏幕，「查看全部」被挤出可视区
+        // 再加上左边 88 的导航栏就顶出屏幕，右侧内容被挤出可视区
         Column() {
           this.content()
         }

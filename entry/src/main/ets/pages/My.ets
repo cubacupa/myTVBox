@@ -7,10 +7,10 @@ import { VodItem } from '../model/VodItem';
 import { SideNav } from '../components/SideNav';
 
 /**
- * 收藏（现代版视觉）。
+ * 收藏。
  *
  * 版式与「点播」海报墙一致：左侧 88 窄导航 + 6 列 172×258 海报栅格，
- * 所以从首页「我的收藏 ›」进来不会像换了个 App。
+ * 所以从侧栏进来不会像换了个 App。
  *
  * 删除做成「管理」开关：电视上遥控器很难精准点中卡片角上的小叉，
  * 与其塞一个点不到的按钮，不如开一个模式——开着的时候点卡片就是移除，
@@ -240,7 +240,7 @@ struct My {
         })
 
       Row() {
-        SideNav({ active: 3, siteName: this.siteName })
+        SideNav({ active: 3 })
         Column() {
           // ---------- 顶栏 ----------
           Row() {

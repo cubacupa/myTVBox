@@ -1,9 +1,9 @@
 import { router } from '@kit.ArkUI';
 
 /**
- * 现代版侧边导航（88px 极窄玻璃栏）。
+ * 侧边导航（88px 极窄玻璃栏）。
  *
- * active：0 首页 / 1 点播（完整海报墙） / 2 直播 / 3 收藏 / 4 记录 / 5 设置 / 6 关于
+ * active：0 首页 / 1 点播 / 2 直播 / 3 收藏 / 4 记录 / 5 设置 / 6 关于
  *
  * 前五项是「去哪看片」，设置和关于是配置类的东西，用 Blank 压到栏底，
  * 七项平铺会把 720 的高度吃满，分成两组后一眼就能分出主次。
@@ -14,7 +14,6 @@ import { router } from '@kit.ArkUI';
 @Component
 export struct SideNav {
   @Prop active: number = 0;
-  @Prop siteName: string = '';
   @State navFocus: number = -1;
   @State navHover: number = -1;
   /** 首页用于自己吞掉点击（当前页不重复跳转） */
@@ -142,18 +141,14 @@ export struct SideNav {
 
   build() {
     Column() {
-      // 品牌标识
+      // 品牌标识：与桌面图标同一套橙黄渐变播放三角，透明底直接压在深色侧栏上。
+      // 不再套橙色方块底和辉光，两层橙色叠在一起会糊成一片。
       Stack() {
-        Row()
+        Image($r('app.media.nav_logo'))
           .width(36)
           .height(36)
-          .borderRadius(12)
-          .backgroundColor('#FF8A3D')
-          .shadow({ radius: 22, color: '#66FF8A3D', offsetX: 0, offsetY: 6 })
-        SymbolGlyph($r('sys.symbol.play_fill'))
-          .fontSize(18)
-          .fontColor(['#150A04'])
-          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          .objectFit(ImageFit.Contain)
+          .draggable(false)
       }
       .width(88)
       .height(74)

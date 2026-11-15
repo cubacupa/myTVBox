@@ -37,15 +37,15 @@ export class ConfigStore {
     if (AppState.loaded) {
       return;
     }
-    // 内置直播列表存在 rawfile（一千多条源，不能内联进代码）。
+    // 如果打包时往 resources/rawfile/live_builtin.m3u 放了一份频道表，这里读进内存。
     // 在 init 里读是因为：只有这里有 context，而 LiveApi 是纯静态类拿不到资源管理器；
     // 也放不进 EntryAbility —— 它是 .ts，ArkTS 不允许 .ts 反引 .ets。
-    // 读失败不致命，BuiltinConfig.liveM3u() 会退回内联的那 27 条日港台。
+    // 开源版默认不带这个文件，读失败是正常情况，直播页就是空列表。
     try {
       const raw: Uint8Array = ctx.resourceManager.getRawFileContentSync(BuiltinConfig.LIVE_RAWFILE);
       BuiltinConfig.setLiveText(util.TextDecoder.create('utf-8').decodeToString(raw));
     } catch (e) {
-      AppState.err = '内置直播列表读取失败：' + (e as Error).message;
+      // 没放频道表：不提示，直播页显示空列表
     }
     // 先把自己收集的站点灌进内置 Default，下面取 BuiltinConfig.text() 时才带得上
     MySitesStore.init(ctx);

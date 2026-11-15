@@ -779,6 +779,18 @@ export class HttpUtil {
     }
   }
 
+  /**
+   * 有些采集站的 vod_id 是 18 位大整数，JSON.parse 按 IEEE754
+   * 解析会丢精度：629109902295433220 → 629109902295433216，
+   * 再拿它去 ac=detail&ids= 查详情必然返回空（界面显示「没有取到影片详情」）。
+   * 解析前给这种超大 ID 字面量加引号，当字符串保住原值。
+   * 只匹配 16 位以上的整数字面量：短 ID 站点、total / page 等数字都不受影响，
+   * 本来就是字符串的 ID 也不会被改动。
+   */
+  private static guardBigIds(s: string): string {
+    return s.replace(/("vod_id"\s*:\s*)(\d{16,})/g, '$1"$2"');
+  }
+
   static async getJson<T>(url: string): Promise<T> {
     const text: string = await HttpUtil.getText(url);
     const t: string = text.trim();
@@ -791,7 +803,7 @@ export class HttpUtil {
         + HttpUtil.clean(url) + '\n内容开头：' + t.substring(0, 120));
     }
     try {
-      return JSON.parse(t) as T;
+      return JSON.parse(HttpUtil.guardBigIds(t)) as T;
     } catch (e) {
       throw new Error('JSON 解析失败 · ' + HttpUtil.clean(url) + '\n' + (e as Error).message);
     }

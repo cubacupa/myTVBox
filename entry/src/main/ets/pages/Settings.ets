@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { promptAction } from '@kit.ArkUI';
 import { AppState } from '../utils/AppState';
 import { ConfigStore } from '../utils/ConfigStore';
 import { ApiStore, SavedApi } from '../utils/ApiStore';
@@ -18,13 +19,10 @@ import { SideNav } from '../components/SideNav';
  * 设置页配色。与首页 / 收藏 / 历史同一套：近黑底 + 琥珀高亮，
  * 卡片比底色亮一点、描边比卡片亮一点，层级靠明度差而不是靠颜色。
  */
-const C_BG: string = '#08090B';
 const C_CARD: string = '#0F1015';
 const C_LINE: string = '#1A1B22';
-const C_ROW: string = '#14151C';
 const C_INPUT: string = '#16171E';
 const C_ACCENT: string = '#FF8A3D';
-const C_TEXT: string = '#E4E4EC';
 const C_SUB: string = '#8E8E9A';
 const C_DIM: string = '#6E6E7A';
 
@@ -87,7 +85,6 @@ struct Settings {
   @State configName: string = '';
   @State usableCount: number = 0;
   @State parseCount: number = 0;
-  @State msg: string = '';
   @State errMsg: string = '';
   /** '' | 'vod' | 'live'：哪一块正在联网，用来禁掉重复点击 */
   @State busy: string = '';
@@ -140,7 +137,7 @@ struct Settings {
     try {
       await ConfigStore.init(ctx);
     } catch (e) {
-      this.msg = (e as Error).message;
+      this.say((e as Error).message);
     }
     this.repos = AppState.repos;
     this.buildRows();
@@ -193,7 +190,7 @@ struct Settings {
       const data = await board.getData();
       const text = data.getPrimaryText();
       if (!text || text.length === 0) {
-        this.msg = '剪贴板里没有文字';
+        this.say('剪贴板里没有文字');
         return;
       }
       if (isLive) {
@@ -203,9 +200,9 @@ struct Settings {
         this.vodAddr = text.trim();
         this.suggestVodName();
       }
-      this.msg = '已从剪贴板粘贴到' + (isLive ? '直播源' : '点播源') + '，按「载入」生效';
+      this.say('已从剪贴板粘贴到' + (isLive ? '直播源' : '点播源') + '，按「载入」生效');
     } catch (e) {
-      this.msg = '粘贴失败：' + (e as Error).message;
+      this.say('粘贴失败：' + (e as Error).message);
     }
   }
 
@@ -328,7 +325,7 @@ struct Settings {
       return;
     }
     this.busy = 'vod';
-    this.msg = '正在拉取点播配置…';
+    this.say('正在拉取点播配置…');
     const ctx = getContext(this) as common.Context;
     try {
       const m = await ConfigStore.importAddress(ctx, this.vodAddr, this.vodName);
@@ -336,13 +333,13 @@ struct Settings {
       this.rows = [];
       if (this.repos.length > 0) {
         this.buildRows();
-        this.msg = m + '（点下方仓库加载，或先「扫描全部」找出能用的）';
+        this.say(m + '（点下方仓库加载，或先「扫描全部」找出能用的）');
       } else {
-        this.msg = m;
+        this.say(m);
       }
       this.sync();
     } catch (e) {
-      this.msg = '点播源载入失败：' + (e as Error).message;
+      this.say('点播源载入失败：' + (e as Error).message);
     } finally {
       this.busy = '';
     }
@@ -353,13 +350,13 @@ struct Settings {
       return;
     }
     this.busy = 'live';
-    this.msg = '正在拉取直播源…';
+    this.say('正在拉取直播源…');
     const ctx = getContext(this) as common.Context;
     try {
-      this.msg = await ConfigStore.loadLive(ctx, this.liveAddr, this.liveName);
+      this.say(await ConfigStore.loadLive(ctx, this.liveAddr, this.liveName));
       this.sync();
     } catch (e) {
-      this.msg = '直播源载入失败：' + (e as Error).message;
+      this.say('直播源载入失败：' + (e as Error).message);
     } finally {
       this.busy = '';
     }
@@ -369,7 +366,7 @@ struct Settings {
   private backToVodLive(): void {
     const ctx = getContext(this) as common.Context;
     ConfigStore.clearLive(ctx);
-    this.msg = '直播源已改回跟随点播源（' + this.livesAfterFollow() + '）';
+    this.say('直播源已跟随点播源（' + this.livesAfterFollow() + '）');
     this.sync();
   }
 
@@ -424,13 +421,13 @@ struct Settings {
   private doRename(): void {
     const nm: string = this.renameText.trim();
     if (nm.length === 0) {
-      this.msg = '名字不能为空';
+      this.say('名字不能为空');
       return;
     }
     const ctx = getContext(this) as common.Context;
     ConfigStore.renameApi(ctx, this.renameUrl, nm);
     this.renameOpen = false;
-    this.msg = '已改名为「' + nm + '」';
+    this.say('已改名为「' + nm + '」');
     this.sync();
   }
 
@@ -438,7 +435,7 @@ struct Settings {
     const ctx = getContext(this) as common.Context;
     ConfigStore.removeApi(ctx, a.url);
     const isCur: boolean = a.url === AppState.configUrl;
-    this.msg = '已从列表移除「' + a.name + '」' + (isCur ? '，但当前点播源还是它（地址没变）' : '');
+    this.say('已从列表移除「' + a.name + '」' + (isCur ? '，但当前点播源还是它（地址没变）' : ''));
     this.sync();
   }
 
@@ -490,16 +487,16 @@ struct Settings {
       return;
     }
     this.busy = 'vod';
-    this.msg = '正在加载「' + name + '」…';
+    this.say('正在加载「' + name + '」…');
     const ctx = getContext(this) as common.Context;
     const r = new RepoCfg();
     r.name = name;
     r.url = url;
     try {
-      this.msg = await ConfigStore.importRepo(ctx, r);
+      this.say(await ConfigStore.importRepo(ctx, r));
       this.sync();
     } catch (e) {
-      this.msg = '加载仓库失败：' + (e as Error).message;
+      this.say('加载仓库失败：' + (e as Error).message);
     } finally {
       this.busy = '';
     }
@@ -507,13 +504,13 @@ struct Settings {
 
   private async useSite(s: SiteCfg): Promise<void> {
     if (!AppState.isUsable(s)) {
-      this.msg = '「' + s.name + '」依赖 spider，已从列表过滤';
+      this.say('「' + s.name + '」依赖 spider，已从列表过滤');
       return;
     }
     const ctx = getContext(this) as common.Context;
     await ConfigStore.setSite(ctx, s);
     this.curKey = s.key;
-    this.msg = '已切换到「' + s.name + '」，回点播页刷新即可';
+    this.say('已切换到「' + s.name + '」，回点播页刷新即可');
   }
 
   /** 只有「用户自己收进 Default」的站点能删；预设的暴风资源永远不显示删除 */
@@ -523,7 +520,7 @@ struct Settings {
 
   private delMySite(s: SiteCfg): void {
     const ctx = getContext(this) as common.Context;
-    this.msg = MySitesStore.remove(ctx, s.api ?? '');
+    this.say(MySitesStore.remove(ctx, s.api ?? ''));
     // Default 是静态拼出来的，写盘后要重新解析一次，资源站列表才会少一行；
     // applyText 会按 key 重新绑定当前站，删掉的正好是当前站时自动落到剩下的第一个
     if (BuiltinConfig.isBuiltin(AppState.configUrl)) {
@@ -653,6 +650,23 @@ struct Settings {
     this.sync();
   }
 
+  /** 操作反馈一律走 toast：短暂停留，不在页面上占一行常驻文字 */
+  private say(text: string): void {
+    const s: string = (text ?? '').trim();
+    if (s.length === 0) {
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: s, duration: 2200 });
+    } catch (e) {
+      try {
+        promptAction.showToast({ message: s, duration: 2200 });
+      } catch (e2) {
+        // 提示失败不影响操作本身
+      }
+    }
+  }
+
   // ---------- UI ----------
 
   @Builder
@@ -741,7 +755,7 @@ struct Settings {
    *
    * 注意：这里四个 builder 都不带参数。@Builder 的入参是值传递，父组件状态
    * 变了不会重建节点 —— 带参数的话，点「粘贴」把地址写进 this.vodAddr，
-   * 输入框里会一直显示旧内容（TopBar 上踩过同样的坑）。
+   * 输入框里会一直显示旧内容。
    */
   @Builder
   vodNameBox() {
@@ -821,7 +835,7 @@ struct Settings {
         })
 
       Row() {
-        SideNav({ active: 5, siteName: this.configName })
+        SideNav({ active: 5 })
         Column() {
         this.pageHeader()
 
@@ -847,7 +861,7 @@ struct Settings {
                     .borderRadius(12)
                     .onClick(() => { this.pasteInto(false); })
                   Button(this.busy === 'vod' ? '载入中…' : '载入')
-                    .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#FF8A3D')
+                    .height(46).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
                     .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.loadVod(); })
                   Button('清空')
@@ -896,14 +910,21 @@ struct Settings {
                 }
                 .width('100%')
 
-                // 操作按钮另起一行，与左列同样占满整行、靠右对齐
+                // 操作按钮另起一行：「跟随点播源」贴左，其余按钮靠右
                 Row() {
+                  if (this.liveOwn) {
+                    Button('跟随点播源')
+                      .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
+                      .borderRadius(12)
+                      .onClick(() => { this.backToVodLive(); })
+                  }
+                  Blank()
                   Button('粘贴')
                     .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#232530')
                     .borderRadius(12)
                     .onClick(() => { this.pasteInto(true); })
                   Button(this.busy === 'live' ? '载入中…' : '载入')
-                    .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#FF8A3D')
+                    .height(46).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
                     .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.loadLiveSrc(); })
                   Button('清空')
@@ -916,22 +937,21 @@ struct Settings {
                     .onClick(() => { this.openPush('live'); })
                 }
                 .width('100%')
-                .justifyContent(FlexAlign.End)
                 .margin({ top: 10 })
 
-                // 源清单直接跟在「直播列表 N 个」后面：这一行本来就在回答「现在用哪个源、有几个」，
-                // 名字贴着它才对得上；源多时 Flex 自动折到下一行，不会把这句话挤变形。
-                Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-                  Text(this.liveOwn
-                    ? '当前：独立直播源「' + (this.liveName.length > 0 ? this.liveName : '未命名')
-                      + '」· 直播列表 ' + this.lives.length + ' 个'
-                    : '当前：跟随点播源「' + (this.configName.length > 0 ? this.configName : '未命名')
-                      + '」· 直播列表 ' + this.lives.length + ' 个')
-                    .fontSize(13)
-                    .fontColor('#8E8E9A')
-                    .margin({ right: 10, top: 6 })
+                // 状态行独占一行；源名清单另开一行，别让它贴着「当前：…」把这句话挤成两截。
+                Text(this.liveOwn
+                  ? '当前：独立直播源「' + (this.liveName.length > 0 ? this.liveName : '未命名')
+                    + '」· 直播列表 ' + this.lives.length + ' 个'
+                  : '当前：跟随点播源「' + (this.configName.length > 0 ? this.configName : '未命名')
+                    + '」· 直播列表 ' + this.lives.length + ' 个')
+                  .fontSize(13)
+                  .fontColor('#8E8E9A')
+                  .width('100%')
+                  .margin({ top: 6 })
 
-                  if (this.lives.length > 0) {
+                if (this.lives.length > 0) {
+                  Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
                     ForEach(this.lives, (l: LiveCfg, idx: number) => {
                       Text(l.name + (LiveSrcProbe.isBad(l.url) ? ' · 空' : ''))
                         .fontSize(12.5)
@@ -942,21 +962,9 @@ struct Settings {
                         .margin({ right: 8, top: 6 })
                     }, (l: LiveCfg, idx: number) => l.name + String(idx))
                   }
-
-                  if (this.liveOwn) {
-                    Text('改回跟随点播源')
-                      .fontSize(13)
-                      .fontColor('#8E8E9A')
-                      .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-                      .backgroundColor('#232530')
-                      .borderRadius(9)
-                      .margin({ top: 6 })
-                      .focusable(true)
-                      .onClick(() => { this.backToVodLive(); })
-                  }
+                  .width('100%')
+                  .margin({ top: 2 })
                 }
-                .width('100%')
-                .margin({ top: 2 })
               }
               .layoutWeight(1)
               .padding({ left: 20, right: 20, top: 6, bottom: 18 })
@@ -968,10 +976,6 @@ struct Settings {
             .width('100%')
             .alignItems(VerticalAlign.Top)
             .margin({ top: 14 })
-
-            if (this.msg) {
-              Text(this.msg).fontSize(14).fontColor('#7FD88A').width('100%').margin({ top: 10 })
-            }
 
             // ---------- 家长锁 / 豆瓣账号：左右并列，各占半屏 ----------
             Row() {
@@ -992,7 +996,7 @@ struct Settings {
                     .maxLength(4)
                     .onChange((v: string) => { this.pinText = v; })
                   Button('设置 / 修改')
-                    .height(44).fontSize(14).fontColor('#FFFFFF')
+                    .height(44).fontSize(14).fontColor('#150A04')
                     .backgroundColor('#FF8A3D').borderRadius(12)
                     .margin({ left: 12 })
                     .onClick(() => { this.savePin(); })
@@ -1038,7 +1042,7 @@ struct Settings {
                     .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.openPush('cookie'); })
                   Button(this.doubanBusy ? '验证中…' : '保存并验证')
-                    .height(42).fontSize(14).fontColor('#FFFFFF').backgroundColor('#FF8A3D')
+                    .height(42).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
                     .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.saveCookie(); })
                   if (this.doubanHas) {
@@ -1145,6 +1149,10 @@ struct Settings {
                     .borderRadius(12)
                     .margin({ bottom: 8 })
                   }, (a: SavedApi, idx: number) => idx + '|' + a.url + '|' + a.name)
+
+                  // 界面上只留一条操作提示；技术原因（spider 运行时）写在代码注释和对话里
+                  Text('点播源和直播源各存一份，互不影响：某个接口只有直播能用时，点「设为直播」即可。')
+                    .fontSize(13).fontColor('#7E7E8A').width('100%').margin({ top: 10 })
                 }
 
                 // ---------- 多仓仓库：和接口同属「来源」，跟在左列 ----------
@@ -1157,7 +1165,7 @@ struct Settings {
                     Button(this.scanning ? '扫描中…' : '扫描全部')
                       .height(36).fontSize(14)
                       .backgroundColor(this.scanning ? '#232530' : '#FF8A3D')
-                      .fontColor('#FFFFFF')
+                      .fontColor(this.scanning ? '#FFFFFF' : '#150A04')
                       .onClick(() => { this.scanAll(); })
                   }
                   .width('100%')
@@ -1242,9 +1250,6 @@ struct Settings {
                     .fontSize(13).fontColor('#E0B341').width('100%').margin({ top: 8 })
                 }
 
-                // 界面上只留一条操作提示；技术原因（spider 运行时）写在代码注释和对话里
-                Text('点播源和直播源各存一份，互不影响：某个接口只有直播能用时，点「设为直播」即可。')
-                  .fontSize(13).fontColor('#7E7E8A').width('100%').margin({ top: 18 })
               }
               .layoutWeight(1)
               .padding({ left: 20, right: 20, top: 6, bottom: 18 })
@@ -1298,7 +1303,7 @@ struct Settings {
                 .fontSize(14).height(40).backgroundColor('#232530').fontColor('#FFFFFF')
                 .onClick(() => { this.pinClearOpen = false; })
               Button('确认清除')
-                .fontSize(14).height(40).backgroundColor('#FF8A3D').fontColor('#FFFFFF')
+                .fontSize(14).height(40).backgroundColor('#FF8A3D').fontColor('#150A04')
                 .margin({ left: 12 })
                 .onClick(() => { this.doClearPin(); })
             }
@@ -1341,7 +1346,7 @@ struct Settings {
                 .fontSize(14).height(40).backgroundColor('#232530').fontColor('#FFFFFF')
                 .onClick(() => { this.renameOpen = false; })
               Button('保存')
-                .fontSize(14).height(40).backgroundColor('#FF8A3D').fontColor('#FFFFFF')
+                .fontSize(14).height(40).backgroundColor('#FF8A3D').fontColor('#150A04')
                 .margin({ left: 12 })
                 .onClick(() => { this.doRename(); })
             }

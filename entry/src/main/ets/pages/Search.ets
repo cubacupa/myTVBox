@@ -1,12 +1,22 @@
 import { router } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
 import { AppState } from '../utils/AppState';
 import { SiteApi } from '../utils/SiteApi';
 import { VodItem } from '../model/VodItem';
 import { PosterCard } from '../components/PosterCard';
 import { RatingStore } from '../utils/RatingStore';
+import { SideNav } from '../components/SideNav';
+import { FileStore } from '../utils/FileStore';
+
+const F_HIST: string = 'tvbox_search_history.json';
+const HIST_MAX: number = 20;
 
 /**
  * 搜索页：当前站点搜索，或聚合当前配置里所有可用站点（最多 8 个，避免长时间等待）。
+ *
+ * 视觉跟其它页面一致：全屏渐变底 + 左侧 88 导航栏 + 34px 标题栏。
+ * 主体左右分栏：左边固定一列放搜索历史 chip（本机沙箱持久化，最近用过的在最前），
+ * 右边是 4 列现代海报卡结果区。
  */
 @Entry
 @Component
@@ -17,13 +27,76 @@ struct SearchPage {
   @State msg: string = '';
   @State agg: boolean = false;
   @State siteName: string = '';
+  @State history: string[] = [];
+  @State confirmClear: boolean = false;
+  @State focusId: string = '';
+  @State hoverId: string = '';
 
   aboutToAppear(): void {
+    this.wd = '';
     const site = AppState.currentSite;
     if (site !== null) {
       this.siteName = site.name;
     }
+    this.history = this.readHistory(getContext(this) as common.Context);
   }
+
+  // ---------------- 搜索历史：本机文件，最近优先、去重、最多 20 条 ----------------
+
+  private readHistory(ctx: common.Context): string[] {
+    const txt: string = FileStore.readText(ctx, F_HIST);
+    if (txt.length === 0) {
+      return [];
+    }
+    try {
+      const arr = JSON.parse(txt) as string[];
+      if (!Array.isArray(arr)) {
+        return [];
+      }
+      const out: string[] = [];
+      for (const w of arr) {
+        if (typeof w === 'string' && w.trim().length > 0 && out.indexOf(w) < 0) {
+          out.push(w);
+        }
+        if (out.length >= HIST_MAX) {
+          break;
+        }
+      }
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  private addHistory(ctx: common.Context, word: string): string[] {
+    const w: string = word.trim();
+    if (w.length === 0) {
+      return this.readHistory(ctx);
+    }
+    const next: string[] = [w];
+    for (const old of this.readHistory(ctx)) {
+      if (old !== w && next.length < HIST_MAX) {
+        next.push(old);
+      }
+    }
+    FileStore.writeText(ctx, F_HIST, JSON.stringify(next));
+    return next;
+  }
+
+  private hot(id: string): boolean {
+    return this.focusId === id || this.hoverId === id;
+  }
+
+  private clearHot(id: string): void {
+    if (this.focusId === id) {
+      this.focusId = '';
+    }
+    if (this.hoverId === id) {
+      this.hoverId = '';
+    }
+  }
+
+  // ---------------- 搜索 ----------------
 
   private async doSearch(): Promise<void> {
     const w = this.wd.trim();
@@ -31,6 +104,11 @@ struct SearchPage {
       this.msg = '请输入关键词';
       return;
     }
+    const ctx = getContext(this) as common.Context;
+    this.history = this.addHistory(ctx, w);
+    // 搜索一开始就清空输入框：关键词已经进了历史 chip，框里不用再留一份
+    this.wd = '';
+    this.confirmClear = false;
     this.loading = true;
     this.msg = '';
     this.items = [];
@@ -84,71 +162,292 @@ struct SearchPage {
     router.pushUrl({
       url: 'pages/Detail',
       params: { key: key, vodId: String(item.vod_id) }
-    });
+    }).catch(() => {});
   }
 
-  build() {
+  // ---------------- UI ----------------
+
+  /** 顶栏右侧胶囊，跟记录/设置页同一套 */
+  @Builder
+  topPill(id: string, label: string, accent: boolean) {
+    Row() {
+      Text(label)
+        .fontSize(13.5)
+        .fontWeight(accent ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(accent ? '#150A04' : (this.hot(id) ? '#FFD9BC' : '#C9C9D4'))
+    }
+    .height(40)
+    .padding({ left: 18, right: 18 })
+    .borderRadius(20)
+    .backgroundColor(accent ? '#FF8A3D' : (this.hot(id) ? '#1C1D25' : '#12FFFFFF'))
+    .border({
+      width: 1,
+      color: accent ? Color.Transparent : (this.hot(id) ? '#FFD9BC' : '#22FFFFFF')
+    })
+    .focusable(true)
+    .onFocus(() => { this.focusId = id; })
+    .onBlur(() => { this.clearHot(id); })
+    .onHover((isHover: boolean) => { this.hoverId = isHover ? id : ''; })
+    .onClick(() => {
+      if (id === 'agg') {
+        this.agg = !this.agg;
+      } else if (id === 'back') {
+        router.back();
+      }
+    })
+  }
+
+  /** 历史词 chip：点一下就按这个词搜 */
+  @Builder
+  historyChip(word: string, idx: number) {
+    Row() {
+      Text(word)
+        .fontSize(13)
+        .fontColor(this.hot('h' + idx) ? '#150A04' : '#C9C9D4')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .constraintSize({ maxWidth: 168 })
+    }
+    .height(36)
+    .padding({ left: 14, right: 14 })
+    .borderRadius(18)
+    .backgroundColor(this.hot('h' + idx) ? '#FF8A3D' : '#12FFFFFF')
+    .border({
+      width: 1,
+      color: this.hot('h' + idx) ? Color.Transparent : '#22FFFFFF'
+    })
+    .margin({ right: 8, bottom: 10 })
+    .focusable(true)
+    .onFocus(() => { this.focusId = 'h' + idx; })
+    .onBlur(() => { this.clearHot('h' + idx); })
+    .onHover((isHover: boolean) => { this.hoverId = isHover ? 'h' + idx : ''; })
+    .onClick(() => {
+      this.wd = word;
+      this.doSearch();
+    })
+  }
+
+  /** 清空历史：两次点击，防遥控误触 */
+  @Builder
+  clearPill() {
+    Row() {
+      Text(this.confirmClear ? '确认清空' : '清空历史')
+        .fontSize(12.5)
+        .fontColor(this.confirmClear ? '#FF8A6B' : '#7E7E8A')
+    }
+    .height(34)
+    .padding({ left: 12, right: 12 })
+    .borderRadius(10)
+    .backgroundColor(this.confirmClear ? '#22FF8A3D' : Color.Transparent)
+    .margin({ top: 6 })
+    .focusable(true)
+    .onClick(() => {
+      if (!this.confirmClear) {
+        this.confirmClear = true;
+        return;
+      }
+      const ctx = getContext(this) as common.Context;
+      FileStore.remove(ctx, F_HIST);
+      this.history = [];
+      this.confirmClear = false;
+    })
+  }
+
+  /** 左侧：搜索历史列表空间 */
+  @Builder
+  historyPane() {
     Column() {
       Row() {
-        Button('‹ 返回').fontSize(15).height(40)
-          .onClick(() => { router.back(); })
-        TextInput({ text: this.wd, placeholder: '输入片名，OK 键搜索' })
-          .layoutWeight(1)
-          .height(48)
-          .fontSize(16)
-          .fontColor('#ffffff')
-          .placeholderColor('#777777')
-          .backgroundColor('#242424')
-          .borderRadius(8)
-          .margin({ left: 16 })
-          .onChange((v: string) => { this.wd = v; })
-          .onSubmit(() => { this.doSearch(); })
-        Button('搜索')
-          .height(48)
-          .margin({ left: 12 })
-          .backgroundColor('#FF6B00')
-          .fontColor('#ffffff')
-          .onClick(() => { this.doSearch(); })
-        Text(this.agg ? '聚合：开' : '聚合：关')
-          .fontSize(14)
-          .fontColor(this.agg ? '#FF6B00' : '#999999')
-          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
-          .backgroundColor('#2a2a2a')
-          .borderRadius(8)
-          .margin({ left: 12 })
-          .focusable(true)
-          .onClick(() => { this.agg = !this.agg; })
+        Text('搜索历史')
+          .fontSize(13)
+          .fontColor('#8E8E9A')
+        Blank()
+        Text(this.history.length.toString())
+          .fontSize(12)
+          .fontColor('#6E6E7A')
       }
       .width('100%')
-      .padding({ left: 24, right: 24, top: 16, bottom: 8 })
 
-      Text('搜索范围：' + (this.agg ? '当前配置全部可用站点' : this.siteName))
-        .fontSize(13).fontColor('#888888').width('100%').padding({ left: 28 })
+      if (this.history.length === 0) {
+        Text('搜过的关键词会留在这里')
+          .fontSize(12.5)
+          .fontColor('#5C5C68')
+          .width('100%')
+          .margin({ top: 16 })
+        Blank()
+      } else {
+        Scroll() {
+          Column() {
+            Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Start, alignContent: FlexAlign.Start }) {
+              ForEach(this.history, (w: string, idx: number) => {
+                this.historyChip(w, idx)
+              }, (w: string) => w)
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .justifyContent(FlexAlign.Start)
+        }
+        .scrollBar(BarState.Off)
+        .layoutWeight(1)
+        // 关键：ArkUI 通用 .align() 默认是 Alignment.Center。Scroll 的内容比视口矮时，
+        // 整块 chip 流会被摆在垂直正中，光改 Flex 的 alignItems / alignContent 没用。
+        .align(Alignment.TopStart)
+        .margin({ top: 16 })
 
-      if (this.msg) {
-        Text(this.msg).fontSize(15).fontColor('#ff9f9f').width('100%').padding({ left: 28, top: 10 })
+        this.clearPill()
       }
+    }
+    .width(224)
+    .height('100%')
+    .justifyContent(FlexAlign.Start)
+    .padding({ right: 16, top: 16, bottom: 16 })
+    .margin({ left: 44, top: 18, bottom: 22 })
+  }
+
+  /** 右侧：结果区 */
+  @Builder
+  resultPane() {
+    Column() {
+      if (this.msg.length > 0) {
+        Text(this.msg)
+          .fontSize(13)
+          .fontColor('#FF8A6B')
+          .width('100%')
+          .margin({ top: 14, left: 24 })
+      }
+
       if (this.loading) {
         Column() {
           LoadingProgress().width(44).height(44)
-        }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+      } else if (this.items.length === 0) {
+        Column({ space: 12 }) {
+          Text('输入片名开始搜索')
+            .fontSize(20)
+            .fontColor('#DDDDE6')
+          Text('也可以点左边的历史关键词')
+            .fontSize(13)
+            .fontColor('#7E7E8A')
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
       } else {
         Grid() {
           ForEach(this.items, (item: VodItem) => {
             GridItem() {
-              PosterCard({ item: item, onSelect: () => this.goDetail(item) })
+              PosterCard({
+                item: item,
+                cardW: 0,
+                cardH: 264,
+                onSelect: () => this.goDetail(item)
+              })
             }
           }, (item: VodItem) => String(item.site_key ? item.site_key : '') + '_' + String(item.vod_id))
         }
-        .columnsTemplate('1fr 1fr 1fr 1fr 1fr 1fr')
-        .columnsGap(14)
-        .rowsGap(18)
-        .padding({ left: 28, right: 28, top: 12, bottom: 20 })
+        .columnsTemplate('1fr 1fr 1fr 1fr')
+        .columnsGap(16)
+        .rowsGap(20)
+        .padding({ left: 24, right: 36, top: 14, bottom: 26 })
         .layoutWeight(1)
+        .scrollBar(BarState.Off)
+        .cachedCount(4)
       }
+    }
+    .layoutWeight(1)
+    .height('100%')
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      // ---------- 背景：与其它页面同一套暗底 + 顶部琥珀暖光 ----------
+      Column()
+        .width('100%')
+        .height('100%')
+        .linearGradient({
+          angle: 160,
+          colors: [['#1F1A1208', 0.0], ['#0C08090B', 0.45], ['#08090B', 1.0]]
+        })
+
+      Row() {
+        SideNav({ active: 1 })
+        // layoutWeight(1)：写 width('100%') 会把左侧 88 的导航栏顶出屏幕
+        Column() {
+          // ---------- 顶栏 ----------
+          Row() {
+            Row({ space: 12 }) {
+              Text('搜索')
+                .fontSize(34)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
+              Text(this.agg ? '聚合全部可用站点' : this.siteName)
+                .fontSize(12.5)
+                .fontColor('#8E8E9A')
+                .padding({ left: 9, right: 9, top: 3, bottom: 3 })
+                .borderRadius(7)
+                .backgroundColor('#12FFFFFF')
+            }
+            .alignItems(VerticalAlign.Center)
+
+            Blank()
+
+            Row({ space: 10 }) {
+              this.topPill('agg', this.agg ? '聚合：开' : '聚合：关', this.agg)
+              this.topPill('back', '返回', false)
+            }
+          }
+          .width('100%')
+          .height(56)
+          .padding({ left: 44, right: 36 })
+          .margin({ top: 26 })
+
+          // ---------- 搜索输入行 ----------
+          Row({ space: 12 }) {
+            TextInput({ text: this.wd, placeholder: '输入片名，OK 键搜索' })
+              .layoutWeight(1)
+              .height(48)
+              .fontSize(16)
+              .fontColor('#FFFFFF')
+              .placeholderColor('#777780')
+              .backgroundColor('#12FFFFFF')
+              .borderRadius(14)
+              .border({ width: 1, color: '#22FFFFFF' })
+              .padding({ left: 18, right: 18 })
+              .onChange((v: string) => { this.wd = v; })
+              .onSubmit(() => { this.doSearch(); })
+            Button('搜索')
+              .height(48)
+              .fontSize(14)
+              .fontColor('#150A04')
+              .backgroundColor('#FF8A3D')
+              .borderRadius(14)
+              .padding({ left: 24, right: 24 })
+              .onClick(() => { this.doSearch(); })
+          }
+          .width('100%')
+          .padding({ left: 44, right: 36 })
+          .margin({ top: 6 })
+
+          // ---------- 左：历史 chip / 右：结果 ----------
+          Row() {
+            this.historyPane()
+            this.resultPane()
+          }
+          .width('100%')
+          .layoutWeight(1)
+        }
+        .layoutWeight(1)
+        .height('100%')
+      }
+      .width('100%')
+      .height('100%')
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#161616')
   }
 }

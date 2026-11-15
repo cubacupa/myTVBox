@@ -106,7 +106,7 @@ export struct About {
       .height(72)
 
       Column({ space: 8 }) {
-        Text('影视盒现代版')
+        Text('影视盒')
           .fontSize(28)
           .fontWeight(FontWeight.Bold)
           .fontColor('#FFFFFF')
@@ -202,7 +202,7 @@ export struct About {
     Column() {
       this.cardTitle('数据来源')
       this.credit('豆瓣公开接口', '评分、类型、片长、剧照')
-      this.credit('IPTV 公开列表', '内置直播频道表（iptv-org 整理）')
+      this.credit('IPTV 公开列表', '直播源由你自己配置')
       this.credit('第三方采集站', '片名、线路、播放地址')
       this.credit('HarmonyOS ArkUI', '界面与媒体播放能力')
       Text('以上内容版权均归各自权利人所有，本应用只做展示。')
@@ -285,7 +285,7 @@ export struct About {
         })
 
       Row() {
-        SideNav({ active: 6, siteName: AppState.configName })
+        SideNav({ active: 6 })
         Column() {
           this.pageHeader()
 

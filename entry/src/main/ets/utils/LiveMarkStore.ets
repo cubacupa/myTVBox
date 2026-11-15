@@ -173,6 +173,12 @@ export class LiveMarkStore {
     FileStore.writeText(ctx, F_SEEN, JSON.stringify(next));
   }
 
+  /** 清空全部收藏（收藏视图右上角的「清除全部」用） */
+  static clearFavs(ctx: common.Context): void {
+    LiveMarkStore.favArr = [];
+    FileStore.remove(ctx, F_FAV);
+  }
+
   static clearSeen(ctx: common.Context): void {
     LiveMarkStore.seenArr = [];
     FileStore.remove(ctx, F_SEEN);

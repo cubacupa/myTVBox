@@ -8,7 +8,7 @@ import { PinStore } from '../utils/PinStore';
 import { SideNav } from '../components/SideNav';
 
 /**
- * 播放历史（现代版视觉）。
+ * 播放历史。
  *
  * 数据来自 MarkStore 的 tvbox_history.json（详情页点播放时写入，按影片去重、最多 100 条）。
  * 页面直接进、不整页锁屏；只把「敏感词分类下的影片」从列表里摘掉，
@@ -342,7 +342,7 @@ struct History {
         })
 
       Row() {
-        SideNav({ active: 4, siteName: this.siteName })
+        SideNav({ active: 4 })
         Column() {
           // ---------- 顶栏 ----------
           Row() {

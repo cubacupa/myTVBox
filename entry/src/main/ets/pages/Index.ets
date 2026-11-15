@@ -82,12 +82,6 @@ interface SortRef {
   i: number;
 }
 
-/** 从首页「查看全部」进来时带的参数 */
-interface LibParams {
-  typeId?: string;
-  typeName?: string;
-}
-
 @Entry
 @Component
 struct Index {
@@ -97,8 +91,6 @@ struct Index {
   @State curTop: string = '';        // 当前一级分类 id
   @State items: VodItem[] = [];
   @State curClass: string = '';
-  /** 从首页「查看全部」带过来的分类 id：进页面后直接落到这一栏 */
-  private wantTypeId: string = '';
   @State page: number = 1;
   @State pageCount: number = 1;
   /** 当前分类的真实总数（接口 total）。0 = 站点没给，界面就不显示数量 */
@@ -319,11 +311,6 @@ struct Index {
   }
 
   aboutToAppear(): void {
-    // 从首页分类行的「查看全部 / 全部 XX」进来时，落到指定分类
-    const lp = router.getParams() as LibParams;
-    if (lp !== undefined && lp !== null && lp.typeId !== undefined) {
-      this.wantTypeId = lp.typeId;
-    }
     const saved: string | undefined = AppStorage.get<string>(SORT_KEY);
     if (saved === SORT_SCORE || saved === SORT_NEW) {
       this.sortMode = saved;
@@ -441,30 +428,12 @@ struct Index {
       this.classes = normCls;
       this.buildClassTree();
       const firstTop: VodClass | null = this.tops.length > 0 ? this.tops[0] : null;
-      // 「查看全部」带过来的分类优先：可能是一级（电影），也可能是二级（动作片）
-      let useTop: VodClass | null = firstTop;
-      let useClass: string = '';
-      const wanted: VodClass | null = this.classOf(this.wantTypeId);
-      if (wanted !== null) {
-        const wpid: string = wanted.type_pid === undefined ? '' : wanted.type_pid.toString();
-        if (wpid === '' || wpid === '0') {
-          useTop = wanted;
-          const kids: VodClass[] = this.childrenOf(this.pidKey(wanted.type_id));
-          useClass = kids.length > 0 ? kids[0].type_id : this.pidKey(wanted.type_id);
-        } else {
-          const parent: VodClass | null = this.classOf(wpid);
-          useTop = parent === null ? firstTop : parent;
-          useClass = this.pidKey(wanted.type_id);
-        }
-        this.wantTypeId = '';
-      }
-      this.curTop = useTop === null ? '' : this.pidKey(useTop.type_id);
-      this.applySubs(useTop === null ? [] : this.childrenOf(this.curTop));
+      this.curTop = firstTop === null ? '' : this.pidKey(firstTop.type_id);
+      this.applySubs(firstTop === null ? [] : this.childrenOf(this.curTop));
       // 落到第一个子分类而不是一级本身：苹果CMS 的一级（电影片/连续剧）
       // 只装着没归到子类的少数片，所以直接进一级经常只有一两部
-      this.curClass = useClass.length > 0 ? useClass
-        : (this.subs.length > 0 ? this.subs[0].type_id
-          : (useTop === null ? '' : this.pidKey(useTop.type_id)));
+      this.curClass = this.subs.length > 0 ? this.subs[0].type_id
+        : (firstTop === null ? '' : this.pidKey(firstTop.type_id));
       this.initFilters();
       let r = await SiteApi.getList(site, this.curClass, 1, FilterUtil.toQuery(this.sels));
       if (seq !== this.loadSeq) {
@@ -972,19 +941,6 @@ struct Index {
     return true;
   }
 
-  /** 按 id 找分类（一级二级都找），找不到返回 null */
-  private classOf(id: string): VodClass | null {
-    if (id.length === 0) {
-      return null;
-    }
-    for (const c of this.classes) {
-      if (this.pidKey(c.type_id) === id) {
-        return c;
-      }
-    }
-    return null;
-  }
-
   private childrenOf(pid: string): VodClass[] {
     const out: VodClass[] = [];
     if (pid.length === 0) {
@@ -1099,7 +1055,7 @@ struct Index {
     router.pushUrl({
       url: 'pages/Detail',
       params: { key: key, vodId: String(item.vod_id) }
-    });
+    }).catch(() => {});
   }
 
   private async switchSite(s: SiteCfg): Promise<void> {
@@ -1130,7 +1086,7 @@ struct Index {
     await this.loadAll();
   }
 
-  // ---------------- 视图（现代版：与首页同一套视觉语言） ----------------
+  // ---------------- 视图（与首页同一套视觉语言） ----------------
 
   /** 遥控器焦点 + 鼠标悬停（灵犀遥控器按鼠标上报） */
   private hot(id: string): boolean {
@@ -1195,7 +1151,7 @@ struct Index {
   /**
    * 顶栏的「资源站」下拉入口：直接显示当前站点名，右侧一个小三角。
    *
-   * 为什么不放图标：站名本身就带表情图标（「🎬暴风资源」），再叠一个硬盘图标
+   * 为什么不放图标：站名本身常带表情图标，再叠一个硬盘图标
    * 就是两个图标抢位置；而且十尺外看，站名比图标有用得多。
    */
   @Builder
@@ -1532,7 +1488,6 @@ struct Index {
             GridItem() {
               PosterCard({
                 item: item,
-                modern: true,
                 cardW: 172,
                 cardH: 258,
                 onSelect: () => this.goDetail(item)
@@ -1580,7 +1535,7 @@ struct Index {
         })
 
       Row() {
-        SideNav({ active: 1, siteName: this.siteName })
+        SideNav({ active: 1 })
         // 必须 layoutWeight(1)：写 width('100%') 会按整个 Row 的宽度算，
         // 再加上左边 88 的导航栏就顶出屏幕
         Column() {

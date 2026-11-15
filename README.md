@@ -98,7 +98,7 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 entry/src/main/ets/
 ├── pages/          Home 首页 / Index 点播 / Live 直播 / Detail 详情 / Player 播放
 │                   Search 搜索 / My 收藏 / History 历史 / Settings 设置 / About 关于
-├── components/     SideNav 侧栏 / PosterCard 海报卡 / TopBar 顶栏 / QrView 二维码
+├── components/     SideNav 侧栏 / PosterCard 海报卡 / QrView 二维码
 ├── model/          TvBoxModels 配置模型 / VodItem 影片
 └── utils/          ConfigStore 配置链路 / ConfigParser 解析 / SiteApi 采集站协议
                     LiveApi 直播解析 / PosterStore 刮削 / BackdropStore 横版剧照

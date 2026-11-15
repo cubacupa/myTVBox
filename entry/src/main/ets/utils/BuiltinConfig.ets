@@ -20,10 +20,17 @@ export class BuiltinConfig {
   static readonly DESC: string = '内置空容器 · 自己收集的站点都放这里';
 
   /**
-   * 内置站点的 api，MySitesStore 用它把「Default 自带站」和「用户收集站」区分开。
+   * 内置站点的 api 列表，MySitesStore / 设置页用它把「Default 自带站」和
+   * 「用户收集站」区分开。
    *
-   * 本工程不预置任何站点，这里留空字符串：规范化后是 ''，任何真实站点都不会命中，
+   * 本工程不预置任何站点，这里留空数组：任何真实站点都不会命中，
    * 因此 Default 里所有站点都来自用户自己收集，随时可以删。
+   */
+  static readonly BUILTIN_APIS: string[] = [];
+
+  /**
+   * 单个内置 api 的旧接口。开源版没有内置站，保留空串以兼容旧调用点；
+   * 新增代码请用 BUILTIN_APIS。
    */
   static readonly BUILTIN_API: string = '';
 

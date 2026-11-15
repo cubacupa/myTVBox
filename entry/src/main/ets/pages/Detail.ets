@@ -12,7 +12,7 @@ import { PlayProgress } from '../utils/PlayProgress';
 
 interface DetailParams {
   key: string;
-  /** 旧版首页传的是 siteKey，两个都认，免得换页面进来站点丢了 */
+  /** 首页传的是 siteKey，两个都认，免得换页面进来站点丢了 */
   siteKey?: string;
   vodId: string;
 }
@@ -48,7 +48,7 @@ struct Detail {
   @StorageProp('posterTick') @Watch('onPosterTick') posterTick: number = 0;
   /** 评分后台补齐信号：读它可让角标重绘 */
   @StorageProp('ratingTick') ratingTick: number = 0;
-  /** 遥控器焦点标记（现代版自绘焦点，不用系统默认描边） */
+  /** 遥控器焦点标记（自绘焦点，不用系统默认描边） */
   @State focusId: string = '';
   private doubanId: string = '';
   private siteKey: string = '';
@@ -77,7 +77,13 @@ struct Detail {
   }
 
   aboutToAppear(): void {
-    const p = router.getParams() as DetailParams;
+    const raw = router.getParams();
+    if (raw === null || raw === undefined) {
+      this.err = '没有拿到影片信息';
+      this.loading = false;
+      return;
+    }
+    const p = raw as DetailParams;
     this.siteKey = p.key !== undefined && p.key.length > 0 ? p.key
       : (p.siteKey === undefined ? '' : p.siteKey);
     this.vodId = p.vodId ?? '';
@@ -273,7 +279,14 @@ struct Detail {
       this.err = '详情加载失败：' + (e as Error).message;
     } finally {
       this.loading = false;
-      setTimeout(() => { this.getUIContext().getFocusController().requestFocus('detail-play'); }, 300);
+      // 定时器回调里的未捕获异常会被判 JsError 杀进程，焦点请求失败必须吞掉
+      setTimeout(() => {
+        try {
+          this.getUIContext().getFocusController().requestFocus('detail-play');
+        } catch (err) {
+          // 焦点交给系统默认即可
+        }
+      }, 300);
     }
   }
 
@@ -349,7 +362,7 @@ struct Detail {
     });
   }
 
-  // ---------------- 现代版视觉（数据与交互沿用上面的方法） ----------------
+  // ---------------- 视觉（数据与交互沿用上面的方法） ----------------
 
   /** 顶部标签：优先豆瓣类型（悬疑 / 犯罪 / 剧情），没有才退回采集站的分类名 */
   private tags(): string[] {
