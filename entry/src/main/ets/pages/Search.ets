@@ -187,22 +187,36 @@ struct SearchPage {
 
   // ---------------- UI ----------------
 
+  /**
+   * 胶囊的文案和强调态必须在 Builder 内部读状态：
+   * @Builder 的参数是**按值传递**的，外面算好传进来，状态变了里面不会刷新
+   * （表现就是「聚合：关」永远不变成「聚合：开」，橙色底也不亮）。
+   */
+  private pillLabel(id: string): string {
+    return id === 'agg' ? (this.agg ? '聚合：开' : '聚合：关') : '返回';
+  }
+
+  private pillAccent(id: string): boolean {
+    return id === 'agg' && this.agg;
+  }
+
   /** 顶栏右侧胶囊，跟记录/设置页同一套 */
   @Builder
-  topPill(id: string, label: string, accent: boolean) {
+  topPill(id: string) {
     Row() {
-      Text(label)
+      Text(this.pillLabel(id))
         .fontSize(13.5)
-        .fontWeight(accent ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(accent ? '#150A04' : (this.hot(id) ? '#FFD9BC' : '#C9C9D4'))
+        .fontWeight(this.pillAccent(id) ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.pillAccent(id) ? '#150A04' : (this.hot(id) ? '#FFD9BC' : '#C9C9D4'))
     }
     .height(40)
     .padding({ left: 18, right: 18 })
     .borderRadius(20)
-    .backgroundColor(accent ? '#FF8A3D' : (this.hot(id) ? '#1C1D25' : '#12FFFFFF'))
+    .backgroundColor(this.pillAccent(id) ? '#FF8A3D'
+      : (this.hot(id) ? '#1C1D25' : '#12FFFFFF'))
     .border({
       width: 1,
-      color: accent ? Color.Transparent : (this.hot(id) ? '#FFD9BC' : '#22FFFFFF')
+      color: this.pillAccent(id) ? Color.Transparent : (this.hot(id) ? '#FFD9BC' : '#22FFFFFF')
     })
     .focusable(true)
     .onFocus(() => { this.focusId = id; })
@@ -281,10 +295,6 @@ struct SearchPage {
         Text('搜索历史')
           .fontSize(13)
           .fontColor('#8E8E9A')
-        Blank()
-        Text(this.history.length.toString())
-          .fontSize(12)
-          .fontColor('#6E6E7A')
       }
       .width('100%')
 
@@ -417,8 +427,8 @@ struct SearchPage {
             Blank()
 
             Row({ space: 10 }) {
-              this.topPill('agg', this.agg ? '聚合：开' : '聚合：关', this.agg)
-              this.topPill('back', '返回', false)
+              this.topPill('agg')
+              this.topPill('back')
             }
           }
           .width('100%')

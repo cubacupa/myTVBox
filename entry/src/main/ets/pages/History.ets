@@ -6,6 +6,7 @@ import { RatingStore } from '../utils/RatingStore';
 import { VodItem } from '../model/VodItem';
 import { PinStore } from '../utils/PinStore';
 import { SideNav } from '../components/SideNav';
+import { PinPad } from '../components/PinPad';
 
 /**
  * 播放历史。
@@ -27,8 +28,6 @@ struct History {
   @State pin: string = '';
   @State histUnlocked: boolean = false;
   @State pinOpen: boolean = false;
-  @State pinInput: string = '';
-  @State pinErr: string = '';
   @State manage: boolean = false;
   @State focusId: string = '';
   @State hoverId: string = '';
@@ -85,20 +84,16 @@ struct History {
       this.refresh();
       return;
     }
-    this.pinInput = '';
-    this.pinErr = '';
     this.pinOpen = true;
   }
 
-  private confirmPin(): void {
-    if (this.pinInput.trim() !== this.pin) {
-      this.pinErr = 'PIN 不对，再试一次';
+  /** 数字键盘输对 PIN 才放开隐藏记录 */
+  private onPinDone(ok: boolean): void {
+    this.pinOpen = false;
+    if (!ok) {
       return;
     }
     PinStore.unlockHistory();
-    this.pinOpen = false;
-    this.pinInput = '';
-    this.pinErr = '';
     this.refresh();
   }
 
@@ -203,23 +198,46 @@ struct History {
     return seen;
   }
 
+  /**
+   * 文案与配色在 Builder 内部读状态：@Builder 参数按值传递，外面算好传进来后
+   * 状态变化不会刷新（解锁按钮会永远显示旧文案）。
+   */
+  private pillLabel(id: string): string {
+    if (id === 'lock') {
+      return this.histUnlocked ? '重新上锁' : '解锁 ' + this.hiddenCount.toString();
+    }
+    if (id === 'manage') {
+      return this.manage ? '完成' : '管理';
+    }
+    return '清空';
+  }
+
+  private pillAccent(id: string): boolean {
+    return id === 'manage' && this.manage;
+  }
+
+  private pillWarn(id: string): boolean {
+    return id === 'lock';
+  }
+
   @Builder
-  topPill(id: string, label: string, accent: boolean, warn: boolean) {
+  topPill(id: string) {
     Row() {
-      Text(label)
+      Text(this.pillLabel(id))
         .fontSize(13.5)
-        .fontWeight(accent ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(accent ? '#150A04' : (warn ? '#FFB37A' : (this.hot(id) ? '#FFD9BC' : '#C9C9D4')))
+        .fontWeight(this.pillAccent(id) ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.pillAccent(id) ? '#150A04'
+          : (this.pillWarn(id) ? '#FFB37A' : (this.hot(id) ? '#FFD9BC' : '#C9C9D4')))
     }
     .height(40)
     .padding({ left: 18, right: 18 })
     .borderRadius(20)
-    .backgroundColor(accent ? '#FF8A3D'
-      : (warn ? '#22FF8A3D' : (this.hot(id) ? '#1C1D25' : '#12FFFFFF')))
+    .backgroundColor(this.pillAccent(id) ? '#FF8A3D'
+      : (this.pillWarn(id) ? '#22FF8A3D' : (this.hot(id) ? '#1C1D25' : '#12FFFFFF')))
     .border({
       width: 1,
-      color: accent ? Color.Transparent
-        : (warn ? '#73FF8A3D' : (this.hot(id) ? '#FFD9BC' : '#22FFFFFF'))
+      color: this.pillAccent(id) ? Color.Transparent
+        : (this.pillWarn(id) ? '#73FF8A3D' : (this.hot(id) ? '#FFD9BC' : '#22FFFFFF'))
     })
     .focusable(true)
     .onFocus(() => { this.focusId = id; })
@@ -370,12 +388,11 @@ struct History {
 
             Row({ space: 10 }) {
               if (this.showLockBtn()) {
-                this.topPill('lock', this.histUnlocked ? '重新上锁' : '解锁 ' + this.hiddenCount.toString(),
-                  false, true)
+                this.topPill('lock')
               }
-              this.topPill('manage', this.manage ? '完成' : '管理', this.manage, false)
+              this.topPill('manage')
               if (this.items.length > 0) {
-                this.topPill('clear', '清空', false, false)
+                this.topPill('clear')
               }
             }
           }
@@ -434,80 +451,15 @@ struct History {
       .width('100%')
       .height('100%')
 
-      // ---------- PIN 解锁浮层 ----------
+      // ---------- PIN 数字键盘 ----------
       if (this.pinOpen) {
-        Column() {
-          Column() {
-            Text('解锁隐藏记录')
-              .fontSize(19)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
-            Text('输入 4 位 PIN')
-              .fontSize(12.5)
-              .fontColor('#8E8E9A')
-              .margin({ top: 8 })
-            TextInput({ text: this.pinInput, placeholder: '4 位数字' })
-              .width('100%')
-              .height(48)
-              .fontSize(18)
-              .fontColor('#FFFFFF')
-              .placeholderColor('#6E6E7A')
-              .backgroundColor('#12FFFFFF')
-              .borderRadius(12)
-              .type(InputType.NUMBER_PASSWORD)
-              .showPasswordIcon(false)
-              .enableAutoFill(false)
-              .inputFilter('[0-9]')
-              .maxLength(4)
-              .margin({ top: 16 })
-              .defaultFocus(true)
-              .onChange((v: string) => { this.pinInput = v; })
-            if (this.pinErr.length > 0) {
-              Text(this.pinErr)
-                .fontSize(12.5)
-                .fontColor('#FF8B7A')
-                .width('100%')
-                .margin({ top: 8 })
-            }
-            Row({ space: 10 }) {
-              Row() {
-                Text('取消')
-                  .fontSize(13.5)
-                  .fontColor('#C9C9D4')
-              }
-              .height(40)
-              .padding({ left: 20, right: 20 })
-              .borderRadius(20)
-              .backgroundColor('#1FFFFFFF')
-              .focusable(true)
-              .onClick(() => { this.pinOpen = false; })
-              Row() {
-                Text('解锁')
-                  .fontSize(13.5)
-                  .fontColor('#150A04')
-              }
-              .height(40)
-              .padding({ left: 22, right: 22 })
-              .borderRadius(20)
-              .backgroundColor('#FF8A3D')
-              .focusable(true)
-              .onClick(() => { this.confirmPin(); })
-            }
-            .width('100%')
-            .justifyContent(FlexAlign.End)
-            .margin({ top: 18 })
+        PinPad({
+          pin: this.pin,
+          title: '解锁隐藏记录',
+          onFinish: (ok: boolean) => {
+            this.onPinDone(ok);
           }
-          .width(400)
-          .backgroundColor('#14151C')
-          .border({ width: 1, color: '#1AFFFFFF' })
-          .borderRadius(22)
-          .padding(24)
-          .shadow({ radius: 60, color: '#B3000000', offsetX: 0, offsetY: 24 })
-        }
-        .width('100%')
-        .height('100%')
-        .backgroundColor('#B3000000')
-        .justifyContent(FlexAlign.Center)
+        })
       }
     }
     .width('100%')

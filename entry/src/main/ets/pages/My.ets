@@ -116,22 +116,37 @@ struct My {
     this.refresh();
   }
 
+  /**
+   * 文案与强调态在 Builder 内部读状态：@Builder 参数按值传递，外面算好传进来后
+   * 状态变化不会刷新（「管理」会永远不变成「完成」）。
+   */
+  private pillLabel(id: string): string {
+    if (id === 'manage') {
+      return this.manage ? '完成' : '管理';
+    }
+    return id === 'clear' ? '清空' : '返回';
+  }
+
+  private pillAccent(id: string): boolean {
+    return id === 'manage' && this.manage;
+  }
+
   @Builder
-  topPill(id: string, label: string, accent: boolean) {
+  topPill(id: string) {
     Row() {
-      Text(label)
+      Text(this.pillLabel(id))
         .fontSize(13.5)
-        .fontWeight(accent ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(accent ? '#150A04' : (this.hot(id) ? '#FFD9BC' : '#C9C9D4'))
+        .fontWeight(this.pillAccent(id) ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.pillAccent(id) ? '#150A04' : (this.hot(id) ? '#FFD9BC' : '#C9C9D4'))
     }
     .height(40)
     .padding({ left: 18, right: 18 })
     .borderRadius(20)
-    .backgroundColor(accent ? '#FF8A3D'
+    .backgroundColor(this.pillAccent(id) ? '#FF8A3D'
       : (this.hot(id) ? '#1C1D25' : '#12FFFFFF'))
     .border({
       width: 1,
-      color: accent ? Color.Transparent : (this.hot(id) ? '#FFD9BC' : '#22FFFFFF')
+      color: this.pillAccent(id) ? Color.Transparent : (this.hot(id) ? '#FFD9BC' : '#22FFFFFF')
     })
     .focusable(true)
     .onFocus(() => { this.focusId = id; })
@@ -285,9 +300,9 @@ struct My {
             Blank()
 
             Row({ space: 10 }) {
-              this.topPill('manage', this.manage ? '完成' : '管理', this.manage)
+              this.topPill('manage')
               if (this.favs.length > 0) {
-                this.topPill('clear', '清空', false)
+                this.topPill('clear')
               }
             }
           }

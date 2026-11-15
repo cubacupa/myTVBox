@@ -14,6 +14,7 @@ import { RatingStore } from '../utils/RatingStore';
 import { PosterStore } from '../utils/PosterStore';
 import { HttpUtil } from '../utils/HttpUtil';
 import { PinStore } from '../utils/PinStore';
+import { PinPad } from '../components/PinPad';
 import { DoubanAuth } from '../utils/DoubanAuth';
 
 /**
@@ -131,8 +132,6 @@ struct Index {
   /** 一级分类里被隐藏的受限项数量（有些站直接有一级「伦理片」这种） */
   @State lockedTopCount: number = 0;
   @State pinOpen: boolean = false;
-  @State pinInput: string = '';
-  @State pinErr: string = '';
 
   /** 豆瓣分 / 海报陆续到货时收到通知，用来判断「按评分排序」什么时候重新排一次 */
   @StorageProp('posterTick') @Watch('onScoreTick') posterTick: number = 0;
@@ -256,22 +255,17 @@ struct Index {
   }
 
   private openPinDialog(): void {
-    this.pinInput = '';
-    this.pinErr = '';
     this.pinOpen = true;
   }
 
-  /** 输对 PIN 后开一个 30 分钟的解锁窗口；不落盘 */
-  private confirmPin(): void {
-    if (this.pinInput.trim() !== this.pin) {
-      this.pinErr = 'PIN 不对，再试一次';
+  /** 数字键盘输对 PIN 后开一个 30 分钟的解锁窗口；不落盘 */
+  private onPinDone(ok: boolean): void {
+    this.pinOpen = false;
+    if (!ok) {
       return;
     }
     this.unlocked = true;
     PinStore.unlockVod();   // 只解锁点播分类；历史页有自己独立的解锁态
-    this.pinOpen = false;
-    this.pinInput = '';
-    this.pinErr = '';
     this.applyTops(this.allTops);
     this.applySubs(this.allSubs);
     this.showToast('已解锁：受限分类 30 分钟内可见，到期自动上锁');
@@ -1713,81 +1707,15 @@ struct Index {
         .justifyContent(FlexAlign.Center)
       }
 
-      // ---------- 家长锁 ----------
+      // ---------- 家长锁：直接给数字键盘，输满 4 位自动解锁 ----------
       if (this.pinOpen) {
-        Column() {
-          Column() {
-            Text('家长锁')
-              .fontSize(19)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
-            Text('输入 4 位 PIN 解锁')
-              .fontSize(12.5)
-              .fontColor('#8E8E9A')
-              .margin({ top: 8 })
-            TextInput({ text: this.pinInput, placeholder: '4 位数字' })
-              .width('100%')
-              .height(48)
-              .fontSize(18)
-              .fontColor('#FFFFFF')
-              .placeholderColor('#6E6E7A')
-              .backgroundColor('#12FFFFFF')
-              .borderRadius(12)
-              // NUMBER_PASSWORD = 数字键盘 + 圆点掩码，电视上不显示明文也不弹全键盘
-              .type(InputType.NUMBER_PASSWORD)
-              .showPasswordIcon(false)
-              .enableAutoFill(false)
-              .inputFilter('[0-9]')
-              .maxLength(4)
-              .margin({ top: 16 })
-              .defaultFocus(true)
-              .onChange((v: string) => { this.pinInput = v; })
-            if (this.pinErr.length > 0) {
-              Text(this.pinErr)
-                .fontSize(12.5)
-                .fontColor('#FF8B7A')
-                .width('100%')
-                .margin({ top: 8 })
-            }
-            Row({ space: 10 }) {
-              Row() {
-                Text('取消')
-                  .fontSize(13.5)
-                  .fontColor('#C9C9D4')
-              }
-              .height(40)
-              .padding({ left: 20, right: 20 })
-              .borderRadius(20)
-              .backgroundColor('#1FFFFFFF')
-              .focusable(true)
-              .onClick(() => { this.pinOpen = false; })
-              Row() {
-                Text('解锁')
-                  .fontSize(13.5)
-                  .fontColor('#150A04')
-              }
-              .height(40)
-              .padding({ left: 22, right: 22 })
-              .borderRadius(20)
-              .backgroundColor('#FF8A3D')
-              .focusable(true)
-              .onClick(() => { this.confirmPin(); })
-            }
-            .width('100%')
-            .justifyContent(FlexAlign.End)
-            .margin({ top: 18 })
+        PinPad({
+          pin: this.pin,
+          title: '家长锁',
+          onFinish: (ok: boolean) => {
+            this.onPinDone(ok);
           }
-          .width(400)
-          .backgroundColor('#14151C')
-          .border({ width: 1, color: '#1AFFFFFF' })
-          .borderRadius(22)
-          .padding(24)
-          .shadow({ radius: 60, color: '#B3000000', offsetX: 0, offsetY: 24 })
-        }
-        .width('100%')
-        .height('100%')
-        .backgroundColor('#B3000000')
-        .justifyContent(FlexAlign.Center)
+        })
       }
 
       // ---------- 收集反馈（不吃遥控器点击） ----------
