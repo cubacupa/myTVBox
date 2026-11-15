@@ -28,8 +28,21 @@ const F_CACHE: string = 'tvbox_epg.json';
 const F_RAW: string = 'tvbox_epg_raw.bin';
 const TAG: string = 'EpgStore';
 
-/** 内置 xmltv 源，不暴露给用户配置；改源只改这一行 */
-const EPG_SOURCE: string = 'https://laobaiepg.laobaitv.net/guide.xml.gz';
+/**
+ * 内置 xmltv 源，按顺序尝试，前一个拉不到 / 解析不出频道就自动换下一个。
+ * 不暴露给用户配置；加源减源只改这个数组。
+ *
+ * 顺序原则：先小后大、先稳后补。
+ *   1) laobaiepg：gzip 只有 400KB 左右，国内直连最稳，正常一次就成；
+ *   2) 51zmt：明文 http，频道 100 个左右、节目量足，作为第二道；
+ *   3) jsdelivr 上的 fanmingming/e.xml：7~8MB 纯 xml，覆盖广但最大最慢，留最后兜底。
+ * 前一个成功后会把成功地址写进缓存，缓存里的地址只用于判断新鲜度。
+ */
+const EPG_SOURCES: string[] = [
+  'https://laobaiepg.laobaitv.net/guide.xml.gz',
+  'http://epg.51zmt.top:8000/e.xml',
+  'https://gcore.jsdelivr.net/gh/fanmingming/live@main/e.xml'
+];
 
 const UA: string =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
@@ -253,17 +266,42 @@ export class EpgStore {
   static async ensure(ctx: common.Context): Promise<boolean> {
     EpgStore.init(ctx);
     const ts: number = EpgStore.pack === null ? 0 : EpgStore.pack.ts;
-    // 老版本允许手填地址；缓存里若还留着别的源，直接换成内置源重拉，别让残留配置生效
-    const stale: boolean = EpgStore.pack !== null && EpgStore.pack.url !== EPG_SOURCE;
+    // 缓存里的源必须在内置列表里：老版本手填过别家地址的，直接当过期重拉
+    const stale: boolean = EpgStore.pack !== null && EPG_SOURCES.indexOf(EpgStore.pack.url) < 0;
     if (!stale && EpgStore.hasData() && Date.now() - ts < FRESH_MS) {
       return false;
     }
     try {
-      await EpgStore.refresh(ctx, EPG_SOURCE);
+      await EpgStore.refreshAny(ctx);
       return true;
     } catch (e) {
       return false;
     }
+  }
+
+  /**
+   * 按内置顺序依次尝试，第一个成功的就用它，并把地址记进缓存。
+   * 全部失败才 throw（带上最后一个失败原因）。
+   *
+   * 不优先用「上次成功的那个源」：那样一旦临时掉到后面的源就再也回不来，
+   * 会长期拿着 8MB 的兜底源每 12 小时重下一次。固定顺序能自动回到最轻的源。
+   */
+  static async refreshAny(ctx: common.Context): Promise<string> {
+    if (EpgStore.loading) {
+      return '正在拉取节目单…';
+    }
+    let last: string = '';
+    for (const u of EPG_SOURCES) {
+      try {
+        const ret: string = await EpgStore.refresh(ctx, u);
+        console.info(TAG + ' 节目单命中：' + u);
+        return ret;
+      } catch (e) {
+        last = (e as Error).message;
+        console.warn(TAG + ' 节目单源失败：' + u + ' → ' + last);
+      }
+    }
+    throw new Error(last.length > 0 ? last : '所有节目单源都失败了');
   }
 
   /**
