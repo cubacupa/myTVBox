@@ -28,12 +28,8 @@ const F_CACHE: string = 'tvbox_epg.json';
 const F_RAW: string = 'tvbox_epg_raw.bin';
 const TAG: string = 'EpgStore';
 
-/**
- * xmltv 节目单源。开源版不预置第三方服务：留空时 ensure() 会直接返回 false，
- * 直播页只是不显示「正在播 / 接下来」，不影响播放。
- * 想用节目单，把这里换成自己的 xmltv / xmltv.gz 地址即可。
- */
-const EPG_SOURCE: string = '';
+/** 内置 xmltv 源，不暴露给用户配置；改源只改这一行 */
+const EPG_SOURCE: string = 'https://laobaiepg.laobaitv.net/guide.xml.gz';
 
 const UA: string =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
@@ -74,7 +70,7 @@ export interface EpgChan {
  * 匹配顺序：tvg-id → tvg-id 去国家后缀 → 频道名（含全部 display-name 别名）→ **本表**。
  * 键写**裸名**（小写、去空格标点），匹配时会先剥掉末尾的 tv / television / satellite 再试，
  * 所以一条 `hunan` 就能覆盖 "Hunan TV" / "Hunan Satellite TV"。
- * 值用公共 xmltv 都认的中文台名写法。
+ * 值用 laobaiepg 与 epg.pw 都认的中文台名写法。
  *
  * 注意只收**确实能从英文名唯一确定**的台。「Hunan Economy Channel」（湖南经视）、
  * 「Qingdao TV」（青岛台）这种带副标题的地方台不要往里塞，塞了就会配错台。
