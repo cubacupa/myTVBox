@@ -104,6 +104,15 @@ export class PinStore {
     return false;
   }
 
+  /**
+   * 界面统一判定：这个名字现在该不该藏。
+   * 只有「已设 PIN 且当前没解锁」才藏；没设 PIN 等于没开家长锁，一律放行。
+   * pin 传 PinStore.get() 的结果（没设置就是空串）。
+   */
+  static shouldHide(name: string, pin: string, unlocked: boolean): boolean {
+    return (pin ?? '').length === 4 && !unlocked && PinStore.isRestricted(name);
+  }
+
   static words(): string {
     let s: string = '';
     for (const w of WORDS) {

@@ -5,6 +5,7 @@ import { PosterStore } from '../utils/PosterStore';
 import { RatingStore } from '../utils/RatingStore';
 import { VodItem } from '../model/VodItem';
 import { SideNav } from '../components/SideNav';
+import { PinStore } from '../utils/PinStore';
 
 /**
  * 收藏。
@@ -20,6 +21,8 @@ import { SideNav } from '../components/SideNav';
 @Component
 struct My {
   @State favs: VodMark[] = [];
+  /** 被家长锁挡掉的条数：只用于空态文案，不参与渲染 */
+  @State hiddenN: number = 0;
   /** 管理态：点卡片 = 移除，而不是打开详情 */
   @State manage: boolean = false;
   @State focusId: string = '';
@@ -38,7 +41,21 @@ struct My {
 
   private refresh(): void {
     const ctx = getContext(this) as common.Context;
-    this.favs = MarkStore.listFav(ctx);
+    const all: VodMark[] = MarkStore.listFav(ctx);
+    // 家长锁：设了 PIN 且没解锁时，敏感分类下的收藏不显示（分类名缺失的老记录按片名兜底）
+    const pin: string = PinStore.get(ctx);
+    const unlocked: boolean = PinStore.isVodUnlocked();
+    const out: VodMark[] = [];
+    for (const m of all) {
+      const tn: string = m.typeName === undefined ? '' : m.typeName;
+      const nm: string = tn.length > 0 ? tn : (m.name === undefined ? '' : m.name);
+      if (PinStore.shouldHide(nm, pin, unlocked)) {
+        continue;
+      }
+      out.push(m);
+    }
+    this.hiddenN = all.length - out.length;
+    this.favs = out;
   }
 
   private hot(id: string): boolean {
@@ -255,7 +272,9 @@ struct My {
                 .padding({ left: 9, right: 9, top: 3, bottom: 3 })
                 .borderRadius(7)
                 .backgroundColor('#12FFFFFF')
-              Text(this.favs.length === 0 ? '在详情页点「收藏」，片子就会出现在这里'
+              Text(this.favs.length === 0
+                ? (this.hiddenN > 0 ? '有 ' + this.hiddenN.toString() + ' 部已按家长锁隐藏，解锁后可见'
+                  : '在详情页点「收藏」，片子就会出现在这里')
                 : (this.manage ? '管理态：点任意海报即可移出收藏' : ''))
                 .fontSize(12.5)
                 .fontColor(this.manage ? '#FFB37A' : '#7E7E8A')
@@ -284,10 +303,12 @@ struct My {
                 .fontSize(46)
                 .fontColor(['#3A3B45'])
                 .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-              Text('还没有收藏的影片')
+              Text(this.hiddenN > 0 && this.favs.length === 0 ? '家长锁已开启' : '还没有收藏的影片')
                 .fontSize(20)
                 .fontColor('#DDDDE6')
-              Text('打开一部片子，点详情页的「收藏」，它就会出现在这里')
+              Text(this.hiddenN > 0 && this.favs.length === 0
+                ? '在点播页解锁后回来就能看到'
+                : '打开一部片子，点详情页的「收藏」，它就会出现在这里')
                 .fontSize(13.5)
                 .fontColor('#7E7E8A')
             }

@@ -7,6 +7,7 @@ import { PosterCard } from '../components/PosterCard';
 import { RatingStore } from '../utils/RatingStore';
 import { SideNav } from '../components/SideNav';
 import { FileStore } from '../utils/FileStore';
+import { PinStore } from '../utils/PinStore';
 
 const F_HIST: string = 'tvbox_search_history.json';
 const HIST_MAX: number = 20;
@@ -31,6 +32,9 @@ struct SearchPage {
   @State confirmClear: boolean = false;
   @State focusId: string = '';
   @State hoverId: string = '';
+  /** 家长锁：设了 PIN 且没解锁时，搜索结果里敏感分类的片直接不出现 */
+  @State pin: string = '';
+  @State unlocked: boolean = false;
 
   aboutToAppear(): void {
     this.wd = '';
@@ -38,7 +42,21 @@ struct SearchPage {
     if (site !== null) {
       this.siteName = site.name;
     }
-    this.history = this.readHistory(getContext(this) as common.Context);
+    const ctx = getContext(this) as common.Context;
+    this.history = this.readHistory(ctx);
+    this.pin = PinStore.get(ctx);
+    this.unlocked = PinStore.isVodUnlocked();
+  }
+
+  /** 家长锁：搜索结果按分类名过滤（分类名缺失时按片名兜底，跟历史页一个口径） */
+  private allowed(it: VodItem): boolean {
+    if (this.pin.length === 0 || this.unlocked) {
+      return true;
+    }
+    const tn: string = it.type_name ?? '';
+    return tn.length > 0
+      ? !PinStore.shouldHide(tn, this.pin, this.unlocked)
+      : !PinStore.shouldHide(it.vod_name ?? '', this.pin, this.unlocked);
   }
 
   // ---------------- 搜索历史：本机文件，最近优先、去重、最多 20 条 ----------------
@@ -140,8 +158,10 @@ struct SearchPage {
         }
         this.items = r.items;
       }
+      const rawN: number = this.items.length;
+      this.items = this.items.filter((it: VodItem) => this.allowed(it));
       if (this.items.length === 0) {
-        this.msg = '没有搜到结果，换个关键词或站点试试';
+        this.msg = rawN > 0 ? '结果已按家长锁隐藏，解锁后可见' : '没有搜到结果，换个关键词或站点试试';
       } else {
         // 搜索结果同样参与评分补齐与海报刮削
         RatingStore.warm(this.items);

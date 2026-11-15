@@ -371,7 +371,9 @@ export class PosterStore {
 
   /**
    * 缓存 key：剧名哈希 + 季号后缀（q3 = 第 3 季）。
-   * 不带季号的片名保持原样（'n' + 哈希），老的按名缓存不会失效；
+   * 前缀 n2 是「片名缓存版本」：年份匹配规则改过一次（补搜「片名+年份」），
+   * 旧缓存里只有哈希、没存年份，无法逐条校验是否配错片，只能整代作废重刮；
+   * 带 douban_id 的缓存走 d+id，不受影响。
    * 带季号的片名换成新 key，正好把以前"错季"的缓存数据架空、重新取一遍正确的。
    */
   private static nameKey(item: VodItem): string {
@@ -380,7 +382,7 @@ export class PosterStore {
     if (base.length === 0) {
       return '';
     }
-    const k: string = 'n' + PosterStore.hashName(PosterStore.squash(base));
+    const k: string = 'n2' + PosterStore.hashName(PosterStore.squash(base));
     const sn: number = PosterStore.seasonOf(full);
     return sn > 0 ? k + 'q' + sn.toString() : k;
   }
@@ -690,7 +692,24 @@ export class PosterStore {
         return;
       }
       PosterStore.noteRows();
-      const hit: SuggestTarget | null = PosterStore.pick(cands, raw, year);
+      let hit: SuggestTarget | null = PosterStore.pick(cands, raw, year);
+      // 年份没对上就再补搜一次「片名+年份」。
+      // 豆瓣会把同名重名片直接标进标题（《荒岛惊魂2018》就是独立条目 30320177），
+      // 只搜「荒岛惊魂」只能拿到 1966 / 2005 那两部，于是中国的 2018 片被配成美国片。
+      if (year.length > 0 && !PosterStore.yearOk(hit, year)) {
+        const w2: string = PosterStore.withYear(raw, year);
+        if (w2.length > 0 && tries.indexOf(w2) < 0) {
+          await PosterStore.sleep(PosterStore.gapMs);
+          const c2: SuggestTarget[] = await PosterStore.query(w2);
+          if (c2.length > 0) {
+            const h2: SuggestTarget | null = PosterStore.pick(c2, w2, year);
+            if (PosterStore.yearOk(h2, year)) {
+              hit = h2;
+              hilog.info(DOMAIN, TAG, 'year retry: %{public}s -> %{public}s', raw, w2);
+            }
+          }
+        }
+      }
       if (hit === null) {
         // 只记本次运行不再试，不写 skip 文件：清理规则以后若调整，重启就能重新捞
         PosterStore.tried.set(nk, MAX_TRY);
@@ -751,6 +770,33 @@ export class PosterStore {
         PosterStore.nameQueue.push(item);
       }
     }
+  }
+
+  /** 候选的年份是否等于目标年份；目标年份为空视为不用管年份，算对上 */
+  private static yearOk(hit: SuggestTarget | null, year: string): boolean {
+    if (hit === null) {
+      return false;
+    }
+    const y: string = (year ?? '').trim();
+    if (y.length === 0) {
+      return true;
+    }
+    return (hit.year ?? '').trim() === y;
+  }
+
+  /**
+   * 拼一个「剥掉尾部年份的片名 + 年份」的查询词，拼不出新词就返回空串。
+   * 豆瓣对同名片常直接在标题里带年份，这是唯一能搜到它们的写法。
+   */
+  private static withYear(raw: string, year: string): string {
+    const noYear: string = (raw ?? '').replace(/(19|20)\d{2}$/, '').trim();
+    const base: string = PosterStore.baseOf(noYear);
+    const stem: string = base.length > 0 ? base : noYear;
+    if (stem.length === 0) {
+      return '';
+    }
+    const out: string = stem + (year ?? '').trim();
+    return out === raw ? '' : out;
   }
 
   /** 简单延时（重试之间留空隙用） */
