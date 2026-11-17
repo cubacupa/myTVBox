@@ -440,7 +440,24 @@ struct Detail {
 
   private firstEp(): VodEpisode | null {
     const list: VodEpisode[] = this.eps();
-    return list.length > 0 ? list[0] : null;
+    if (list.length === 0) {
+      return null;
+    }
+    // 画质分集：zuid 等站把 HD / 4K 当同一线路下的两集，第一条是 1080p。
+    // 只有明确同时存在 HD(1080) 与 4K(2160) 两条时才默认选 4K，
+    // 普通「第1集…第N集」不受影响，避免误跳集。
+    let hasHD: boolean = false;
+    let hd4k: VodEpisode | null = null;
+    for (const e of list) {
+      const n: string = (e.name ?? '').toLowerCase();
+      if (n === 'hd' || n.indexOf('1080') >= 0) {
+        hasHD = true;
+      }
+      if (hd4k === null && (n.indexOf('4k') >= 0 || n.indexOf('2160') >= 0)) {
+        hd4k = e;
+      }
+    }
+    return hasHD && hd4k !== null ? hd4k : list[0];
   }
 
   @Builder
