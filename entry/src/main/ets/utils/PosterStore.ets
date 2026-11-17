@@ -63,6 +63,12 @@ const DIR: string = 'posters';
 const SKIP_FILE: string = 'tvbox_poster_skip.json';
 /** "豆瓣确实没开分"的片名，落盘复用，省掉重启后的重复搜索 */
 const NO_SCORE_FILE: string = 'tvbox_noscore.txt';
+/**
+ * 片名 key -> 首次占用它的年份。
+ * 同名不同年的片（如《荒岛惊魂》1966/2018）不能共用一张图和一个分：
+ * 先到的占用基础 key，后到的按年份走派生 key，各存各的。落盘复用，重启不丢。
+ */
+const NAME_YEAR_FILE: string = 'tvbox_name_years.txt';
 /** 记多久：新剧常常晚于上线才开分，一周后重新问一次 */
 const NO_SCORE_TTL_MS: number = 7 * 24 * 3600 * 1000;
 const TICK_KEY: string = 'posterTick';
@@ -220,6 +226,8 @@ export class PosterStore {
   private static noScore: Map<string, number> = new Map<string, number>();
   /** 本次运行里已经从搜索结果拿到过评分的片名，图可能早就有了，不必为补分再搜 */
   private static scored: Set<string> = new Set<string>();
+  /** 片名 key -> 占用它的年份；同名不同年走派生 key，避免串图串分 */
+  private static nameYears: Map<string, string> = new Map<string, string>();
 
   /** 进播放页时调：停掉按名搜索轮询，下载队列也不再发新请求 */
   static pause(): void {
@@ -259,6 +267,7 @@ export class PosterStore {
     PosterStore.scan();
     PosterStore.loadSkip();
     PosterStore.loadNoScore();
+    PosterStore.loadNameYears();
     PosterStore.tick = 0;
     AppStorage.setOrCreate(TICK_KEY, 0);
     hilog.info(DOMAIN, TAG, 'ready: %{public}d posters, %{public}d skipped',
@@ -395,11 +404,49 @@ export class PosterStore {
   }
 
   /**
-   * 对外暴露片名哈希 key，供 RatingStore 按片名存取分数。
-   * 必须和海报用同一个 key，否则「按名搜索拿到的分」下一帧就查不到了。
+   * 有效缓存 key：基础片名 key + 年份冲突时的派生后缀。
+   *
+   * 同名不同年（《荒岛惊魂》1966 / 2018）片名哈希一样，若共用一个 key，
+   * 先刮的图/分会串给后一部。做法：第一次见到某个片名 key 时让它占用
+   * 基础 key 并记下年份（registerYear，只在入队时调一次）；后续同 key
+   * 但年份不同的片走 `基础key_y年份`，图和分各存各的。
+   *
+   * 本方法是**纯查询、无写盘副作用**——RatingStore.scoreOf 每帧调它、
+   * BackdropStore 也调它，绝不能在这里写文件。无年份的片（剧照 probe）
+   * 降级回基础 key，行为不变。
    */
   static nameKeyOf(item: VodItem): string {
-    return PosterStore.nameKey(item);
+    const base: string = PosterStore.nameKey(item);
+    if (base.length === 0) {
+      return '';
+    }
+    const year: string = (item.vod_year ?? '').trim();
+    if (year.length === 0) {
+      return base;   // 没有年份信息，无法区分，退回基础 key（老行为）
+    }
+    const owner: string | undefined = PosterStore.nameYears.get(base);
+    if (owner === undefined || owner === year) {
+      return base;   // 还没人占 / 同年：基础 key
+    }
+    return base + '_y' + year;   // 同名不同年：派生 key，图和分独立
+  }
+
+  /**
+   * 登记片名 key 的年份占用（**只写一次**，在 request 入队时调）。
+   * 无年份、或已登记过就什么都不做——不能让"哪部片先渲染"决定谁占基础 key，
+   * 所以绝不在 nameKeyOf / localOf / scoreOf 这些查询路径里调它。
+   */
+  private static registerYear(item: VodItem): void {
+    const base: string = PosterStore.nameKey(item);
+    const year: string = (item.vod_year ?? '').trim();
+    if (base.length === 0 || year.length === 0) {
+      return;
+    }
+    if (PosterStore.nameYears.has(base)) {
+      return;
+    }
+    PosterStore.nameYears.set(base, year);
+    PosterStore.markNameYear(base, year);
   }
 
   /** 有没有这个豆瓣 ID 的图（给 RatingStore 判断要不要重新查详情用） */
@@ -450,7 +497,7 @@ export class PosterStore {
         return 'file://' + PosterStore.dir + '/' + f + '.jpg';
       }
     }
-    const nk: string = PosterStore.nameKey(item);
+    const nk: string = PosterStore.nameKeyOf(item);
     if (nk.length > 0) {
       const f: string | undefined = PosterStore.files.get(nk);
       if (f !== undefined) {
@@ -474,6 +521,9 @@ export class PosterStore {
     let added: number = 0;
     for (let i = 0; i < items.length; i++) {
       const it: VodItem = items[i];
+      // 先登记年份占用，再算有效 key / 查本地缓存——顺序反了会让同名不同年的片
+      // 都拿到基础 key，后到的图覆盖先到的。登记只在入队路径发生，每 key 一次。
+      PosterStore.registerYear(it);
       const hasLocal: boolean = PosterStore.localOf(it).length > 0;
       if (hasLocal && !scoreOnly) {
         continue;
@@ -483,7 +533,7 @@ export class PosterStore {
         // 有 ID：交给 RatingStore 走 rexxar（同时拿评分和海报），这里不重复请求
         continue;
       }
-      const nk: string = PosterStore.nameKey(it);
+      const nk: string = PosterStore.nameKeyOf(it);
       if (nk.length === 0) {
         continue;
       }
@@ -509,7 +559,7 @@ export class PosterStore {
       }
       let dup: boolean = false;
       for (let j = 0; j < PosterStore.nameQueue.length; j++) {
-        if (PosterStore.nameKey(PosterStore.nameQueue[j]) === nk) {
+        if (PosterStore.nameKeyOf(PosterStore.nameQueue[j]) === nk) {
           dup = true;
           break;
         }
@@ -665,7 +715,9 @@ export class PosterStore {
 
   private static async searchOne(item: VodItem): Promise<void> {
     const raw: string = PosterStore.cleanTitle(item.vod_name ?? '');
-    const nk: string = PosterStore.nameKey(item);
+    // 必须用有效 key（含年份派生后缀），和入队时 registerYear 后的一致；
+    // 用裸 nameKey 会让同名不同年的图/分落回同一个文件，互相覆盖。
+    const nk: string = PosterStore.nameKeyOf(item);
     if (raw.length === 0 || nk.length === 0) {
       return;
     }
@@ -1176,6 +1228,53 @@ export class PosterStore {
       fs.closeSync(f);
     } catch (e) {
       // 写不进去最多下次多搜一遍，不影响功能
+    }
+  }
+
+  /** 读片名 key 的占用年份（base,year 每行），让重启后同名不同年仍走派生 key */
+  private static loadNameYears(): void {
+    PosterStore.nameYears.clear();
+    const ctx: common.Context | null = PosterStore.ctx;
+    if (ctx === null) {
+      return;
+    }
+    try {
+      const raw: string = fs.readTextSync(ctx.filesDir + '/' + NAME_YEAR_FILE);
+      const lines: string[] = raw.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line: string = lines[i].trim();
+        const sep: number = line.indexOf(',');
+        if (sep <= 0) {
+          continue;
+        }
+        const key: string = line.substring(0, sep).trim();
+        const year: string = line.substring(sep + 1).trim();
+        if (key.length > 0 && year.length > 0) {
+          PosterStore.nameYears.set(key, year);
+        }
+      }
+    } catch (e) {
+      // 首次运行没有这个文件
+    }
+  }
+
+  /** 记一条片名 key -> 年份占用，整表覆盖写（量很小，几十到几百行） */
+  private static markNameYear(key: string, year: string): void {
+    const ctx: common.Context | null = PosterStore.ctx;
+    if (ctx === null) {
+      return;
+    }
+    const lines: string[] = [];
+    PosterStore.nameYears.forEach((y: string, k: string) => {
+      lines.push(k + ',' + y);
+    });
+    try {
+      const f = fs.openSync(ctx.filesDir + '/' + NAME_YEAR_FILE,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(f.fd, lines.join('\n'));
+      fs.closeSync(f);
+    } catch (e) {
+      // 写不进去最多重启后重新占用，不影响本次功能
     }
   }
 
