@@ -79,9 +79,9 @@ const SUGGEST_GAP: number = 4000;
  * 登录豆瓣之后的间隔。
  * 未登录时搜索类接口是独立的低配额（实测连查 5 条就 403），只能 4 秒一个。
  * 带上 dbcl2 之后实测 6/6 连发全 200、单条约 0.3s，配额明显更宽，
- * 所以登录态放到 2 秒——首屏 20 张从 80 秒压到 40 秒，不至于慢到像卡住了。
+ * 所以登录态放到 1.2 秒——首屏 20 张从 40 秒再压到 24 秒，不至于慢到像卡住了。
  */
-const SUGGEST_GAP_AUTH: number = 2000;
+const SUGGEST_GAP_AUTH: number = 1200;
 const GAP_MAX: number = 16000;
 const GAP_STEP: number = 4000;
 /** 定时器节拍：真正的间隔由 gapMs 动态控制，节拍只负责来"看一眼" */
@@ -96,6 +96,13 @@ const EMPTY_STREAK_MAX: number = 3;
 const RECOVER_STREAK: number = 15;
 const MAX_FILES: number = 600;
 const MAX_TRY: number = 2;
+/**
+ * 按名搜索队列的总长度上限。
+ * 片库里大量片子没有 douban_id，首页 warm 一次就能灌 150+，
+ * 串行 1.2s/部要跑好几分钟，首屏那批反而迟迟出不来图。
+ * 限到 60：首屏/当前页先出图，靠后的等翻页或下次进页面时再入队（不永久丢弃）。
+ */
+const NAME_QUEUE_MAX: number = 60;
 /** 被风控时允许的额外重试轮数：冷却完放回队首再试，避免一条都把队列堵死 */
 const MAX_BLOCK_TRY: number = 4;
 
@@ -509,6 +516,13 @@ export class PosterStore {
       }
       if (dup) {
         continue;
+      }
+      // 队列到上限就不再灌，靠后的片等用户翻页/下次进页面时再入队。
+      // 用 break 而不是跳过：items 通常按首屏顺序排，超出的整段延后，保住当前页优先出图。
+      // 两条路径（补图补分 / 纯补分）统一受限，避免任一路径绕过上限重新灌爆队列；
+      // dup 检查已保证不重复入队，满额时新片自然顺延到下一次 warm。
+      if (PosterStore.nameQueue.length >= NAME_QUEUE_MAX) {
+        break;
       }
       PosterStore.nameQueue.push(it);
       added++;
