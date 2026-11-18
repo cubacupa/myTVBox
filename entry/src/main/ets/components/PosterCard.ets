@@ -2,6 +2,12 @@ import { VodItem } from '../model/VodItem';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { RatingStore } from '../utils/RatingStore';
 import { PosterStore } from '../utils/PosterStore';
+import { ImageCache } from '../utils/ImageCache';
+
+/** 豆瓣图床直连会被当盗链回 403，这类地址必须先在本地落一份 */
+function needLocalPic(u: string): boolean {
+  return u.indexOf('doubanio.com') >= 0;
+}
 
 /**
  * TV 海报卡片：可被遥控器焦点选中的影片卡片。
@@ -23,6 +29,10 @@ export struct PosterCard {
   @State isFocused: boolean = false;
   @State isHover: boolean = false;
   @State picUri: string = '';
+  /** 站点给的原始外链：直连失败时用它走本地化通道重试 */
+  @State rawPic: string = '';
+  /** 这张卡片是否已经试过本地化，防止 onError 反复触发时死循环 */
+  @State localTried: boolean = false;
   /** 刮削到的本地海报（file:// 路径），空表示还没刮到 */
   @State scrapedUri: string = '';
   /** 评分缓存更新信号：后台补到新分数时 RatingStore 会 +1，卡片跟着重绘角标 */
@@ -58,7 +68,36 @@ export struct PosterCard {
     if (p.length > 0 && !p.startsWith('http://') && !p.startsWith('https://') && !p.startsWith('data:')) {
       p = '';
     }
+    this.rawPic = p;
     this.picUri = p;
+    this.localTried = false;
+    // 豆瓣图床直连必 403（Image 组件带不了 Referer），先本地落盘再画
+    if (p.length > 0 && needLocalPic(p)) {
+      this.useLocal(p);
+    }
+  }
+
+  /** 换成本地文件：已有缓存立刻用，没有就下完再换 */
+  private useLocal(u: string): void {
+    if (this.localTried) {
+      return;
+    }
+    this.localTried = true;
+    const hit: string = ImageCache.cached(u);
+    if (hit.length > 0) {
+      this.picUri = hit;
+      return;
+    }
+    // 先清空：直连那张图必然失败，别让用户看一帧破图
+    this.picUri = '';
+    if (ImageCache.hasFailed(u)) {
+      return;
+    }
+    ImageCache.local(u, '').then((f: string) => {
+      if (f.length > 0) {
+        this.picUri = f;
+      }
+    });
   }
 
   /** 查本地有没有刮削好的海报；变了才换地址，避免每帧重建 Image */
@@ -143,6 +182,10 @@ export struct PosterCard {
             .zIndex(1)
             .onError(() => {
               this.picUri = '';
+              // 别的站的外链也可能设了防盗链，先转本地再试一次（每个 item 只试一次）
+              if (this.rawPic.length > 0) {
+                this.useLocal(this.rawPic);
+              }
             })
         }
 

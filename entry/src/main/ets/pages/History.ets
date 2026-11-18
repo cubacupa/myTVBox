@@ -134,7 +134,7 @@ struct History {
   private open(m: VodMark): void {
     router.pushUrl({
       url: 'pages/Detail',
-      params: { key: m.siteKey, vodId: m.vodId }
+      params: { key: m.siteKey, vodId: m.vodId, name: m.name, pic: m.pic }
     }).catch(() => {});
   }
 

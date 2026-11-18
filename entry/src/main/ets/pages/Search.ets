@@ -1,8 +1,10 @@
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { AppState } from '../utils/AppState';
+import { SniffWeb } from '../components/SniffWeb';
 import { SiteApi } from '../utils/SiteApi';
 import { VodItem } from '../model/VodItem';
+import { SiteCfg } from '../model/TvBoxModels';
 import { PosterCard } from '../components/PosterCard';
 import { RatingStore } from '../utils/RatingStore';
 import { SideNav } from '../components/SideNav';
@@ -132,7 +134,15 @@ struct SearchPage {
     this.items = [];
     try {
       if (this.agg) {
-        const sites = AppState.usableSites();
+        // 网页模式规则要在隐藏 WebView 里真跑页面，一个站就能拖十几秒，
+        // 聚合时跳过；关掉聚合单独搜这个站才有结果
+        const all = AppState.usableSites();
+        const sites: SiteCfg[] = [];
+        for (const s of all) {
+          if (!SiteApi.isWebRule(s)) {
+            sites.push(s);
+          }
+        }
         const limit = sites.length > 8 ? 8 : sites.length;
         for (let i = 0; i < limit; i++) {
           try {
@@ -181,7 +191,7 @@ struct SearchPage {
     }
     router.pushUrl({
       url: 'pages/Detail',
-      params: { key: key, vodId: String(item.vod_id) }
+      params: { key: key, vodId: String(item.vod_id), name: item.vod_name, pic: item.vod_pic }
     }).catch(() => {});
   }
 
@@ -443,6 +453,8 @@ struct SearchPage {
               .height(48)
               .fontSize(16)
               .fontColor('#FFFFFF')
+              // placeholder 字号要单独用 placeholderFont 设，fontSize 管不到它
+              .placeholderFont({ size: 13 })
               .placeholderColor('#777780')
               .backgroundColor('#12FFFFFF')
               .borderRadius(14)
@@ -476,6 +488,9 @@ struct SearchPage {
       }
       .width('100%')
       .height('100%')
+
+      // 网页模式（XPath）规则的搜索要在真页面里跑，这里挂一个隐藏 WebView
+      SniffWeb()
     }
     .width('100%')
     .height('100%')

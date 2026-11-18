@@ -10,12 +10,15 @@ import { SiteCfg } from '../model/TvBoxModels';
 import { VodItem, VodClass } from '../model/VodItem';
 import { PosterCard } from '../components/PosterCard';
 import { SideNav } from '../components/SideNav';
+import { SniffWeb } from '../components/SniffWeb';
 import { RatingStore } from '../utils/RatingStore';
 import { PosterStore } from '../utils/PosterStore';
 import { HttpUtil } from '../utils/HttpUtil';
 import { PinStore } from '../utils/PinStore';
 import { PinPad } from '../components/PinPad';
 import { DoubanAuth } from '../utils/DoubanAuth';
+import { KazumiRuleApi, KazumiRule } from '../utils/KazumiRuleApi';
+import { RuleCategory, categoriesFor } from '../utils/RuleCategories';
 
 /**
  * 点播首页（TVBox 形态）：
@@ -28,6 +31,21 @@ const SORT_NEW: string = 'new';
 const SORT_SCORE: string = 'score';
 const SORT_KEY: string = 'indexSortMode';
 const SORT_ASC_KEY: string = 'indexSortAsc';
+
+/**
+ * 规则站（Kazumi 规则）的网页分类：规则本身没有分类字段，分类是 App 侧预设的
+ * （见 utils/RuleCategories.ets）。这些分类塞进点播页的「二级分类」，
+ * 列表走站点自己的 vodshow 页面，滚动到底继续抓下一页。
+ */
+const RC_PREFIX: string = '__rc';
+const RULE_TOP: string = '__rule_all';
+
+/** 统一的一页结果：普通站来自 CMS 接口，规则站来自网页列表 */
+interface PageResult {
+  items: VodItem[];
+  pageCount: number;
+  total: number;
+}
 
 /**
  * 常见大类名。只有站点里真的存在两个以上这种大类，才启用「按名字分组」的兜底，
@@ -105,6 +123,9 @@ struct Index {
   @State sites: SiteCfg[] = [];
   @State filterGroups: FilterGroup[] = [];
   @State sels: FilterSel[] = [];
+  /** 当前站的网页分类预设（规则站才有，普通采集站为空） */
+  @State ruleCats: RuleCategory[] = [];
+  private ruleObj: KazumiRule | null = null;
   @State showFilter: boolean = false;
   @State sortMode: string = SORT_NEW;
   /** 排序方向：false = 降序（默认），true = 升序 */
@@ -388,6 +409,86 @@ struct Index {
     }
   }
 
+  /** 二级分类 id → 预设下标；不是规则分类返回 -1 */
+  private ruleCatIndex(id: string): number {
+    if (id.indexOf(RC_PREFIX) !== 0) {
+      return -1;
+    }
+    const n: number = Number(id.substring(RC_PREFIX.length));
+    if (Number.isNaN(n) || n < 0 || n >= this.ruleCats.length) {
+      return -1;
+    }
+    return n;
+  }
+
+  /**
+   * 取一页结果。规则站的分类走站点自己的网页列表（隐藏 WebView 抓 XPath），
+   * 其余站点照旧走 CMS 接口 —— 上层（首屏、切分类、滚动加载）只认这个方法。
+   */
+  private async pageOf(site: SiteCfg, classId: string, page: number): Promise<PageResult> {
+    const idx: number = this.ruleCatIndex(classId);
+    if (idx >= 0 && this.ruleObj !== null) {
+      const got = await KazumiRuleApi.browseCategory(this.ruleObj, this.ruleCats[idx], page);
+      // 网页列表不给总页数：这一页还有东西就认为能往下翻，空页由 loadMore 收尾
+      const out: PageResult = {
+        items: got.items,
+        pageCount: got.items.length > 0 ? page + 1 : page,
+        total: 0
+      };
+      return out;
+    }
+    const r = await SiteApi.getList(site, classId, page, FilterUtil.toQuery(this.sels));
+    const out2: PageResult = {
+      items: r.items,
+      pageCount: r.pageCount > 0 ? r.pageCount : 1,
+      total: r.total
+    };
+    return out2;
+  }
+
+  /**
+   * 规则站的首屏：把预设分类挂到二级分类栏，一级只留一个「全部分类」。
+   * 分类抓取比 CMS 接口慢（要真开一次网页），所以这里不试空分类兜底。
+   */
+  private async loadRuleCats(site: SiteCfg, seq: number): Promise<void> {
+    const top: VodClass = { type_id: RULE_TOP, type_name: '全部分类' };
+    this.classes = [];
+    this.applyTops([top]);
+    this.curTop = RULE_TOP;
+
+    const subs: VodClass[] = [];
+    for (let i = 0; i < this.ruleCats.length; i++) {
+      const c: VodClass = {
+        type_id: RC_PREFIX + i.toString(),
+        type_name: this.ruleCats[i].name
+      };
+      subs.push(c);
+    }
+    this.applySubs(subs);
+    this.curClass = subs.length > 0 ? subs[0].type_id : RULE_TOP;
+
+    // 网页分类用不了接口那套筛选维度，别把地区/年份摆出来当摆设
+    this.filterGroups = [];
+    this.sels = [];
+
+    const r = await this.pageOf(site, this.curClass, 1);
+    if (seq !== this.loadSeq) {
+      return;
+    }
+    this.lastSig = this.sigOf(r.items);
+    this.classNote = '';
+    this.raw = r.items;
+    this.items = this.withSort(this.raw);
+    this.page = 1;
+    this.pageCount = r.pageCount;
+    // 站点不给总数，显示 loaded 条数会随滚动变大，是假数字，干脆不显示
+    this.totalCount = 0;
+    RatingStore.warm(this.items);
+    if (this.items.length === 0) {
+      this.err = '这个分类没有返回内容，用「搜索」找片名';
+    }
+  }
+
   private async loadAll(): Promise<void> {
     const site = AppState.currentSite;
     if (site === null) {
@@ -401,6 +502,18 @@ struct Index {
     this.items = [];
     this.page = 1;
     try {
+      // 规则站优先用 App 侧的分类预设（站点网页上的 vodshow 分类）。
+      // 有预设 → 分类进二级栏、列表走网页；没有 → 照旧走 CMS 接口那一套。
+      const rule: KazumiRule | null = SiteApi.ruleFor(site);
+      const cats: RuleCategory[] = rule === null
+        ? []
+        : categoriesFor(rule.baseURL, rule.searchURL);
+      this.ruleObj = rule;
+      this.ruleCats = cats;
+      if (rule !== null && cats.length > 0) {
+        await this.loadRuleCats(site, seq);
+        return;
+      }
       // type_id / type_pid 有的站给数字、有的给字符串。先在这里统一成字符串，
       // 否则界面里 `c.type_id === curClass` 会退化成 number 与 string 比较，
       // 一级点过一次以后二级高亮就永远不亮（暴风影音、淘片都踩过这个坑）。
@@ -474,7 +587,12 @@ struct Index {
       this.totalCount = r.total;
       RatingStore.warm(this.items);
       if (this.items.length === 0) {
-        this.err = '该站点的分类接口没有返回数据（可能已失效，换个站点试试）';
+        // 网页（XPath）规则站先走站点自带的 macCMS 数据接口做全库浏览，
+        // 接口关掉时才可能空，提示改成去找片名
+        const cur: SiteCfg | null = AppState.currentSite;
+        this.err = (cur !== null && SiteApi.isWebRule(cur))
+          ? '这个站点没返回内容，用「搜索」找片名'
+          : '该站点的分类接口没有返回数据（可能已失效，换个站点试试）';
       }
     } catch (e) {
       if (seq !== this.loadSeq) {
@@ -493,6 +611,12 @@ struct Index {
 
   // 筛选维度：优先取配置 ext.filter（去掉排序，采集站不认），取不到用内置地区/年份
   private initFilters(): void {
+    // 规则站的网页分类不认 CMS 的筛选参数，地区/年份摆出来只会点出空列表
+    if (this.ruleCats.length > 0) {
+      this.filterGroups = [];
+      this.sels = [];
+      return;
+    }
     const site = AppState.currentSite;
     if (site === null) {
       this.filterGroups = [];
@@ -688,7 +812,7 @@ struct Index {
     this.err = '';
     this.classNote = '';
     try {
-      const r = await SiteApi.getList(site, this.curClass, 1, FilterUtil.toQuery(this.sels));
+      const r = await this.pageOf(site, this.curClass, 1);
       // 快速连点分类时，先发出的请求可能后返回：只认最后一次点击的结果
       if (seq !== this.fetchSeq) {
         return;
@@ -1029,12 +1153,19 @@ struct Index {
     this.loading = true;
     try {
       const next = this.page + 1;
-      const r = await SiteApi.getList(site, this.curClass, next, FilterUtil.toQuery(this.sels));
+      const r = await this.pageOf(site, this.curClass, next);
+      // 网页列表翻到底会返回空页：把 pageCount 压住，别让 onReachEnd 反复重试
+      if (r.items.length === 0) {
+        this.pageCount = this.page;
+        return;
+      }
       this.raw = this.raw.concat(r.items);
       this.items = this.withSort(this.raw);
       this.page = next;
       this.pageCount = r.pageCount;
-      this.totalCount = r.total;
+      if (r.total > 0) {
+        this.totalCount = r.total;
+      }
       RatingStore.warm(r.items);
     } catch (e) {
       // 加载更多失败不打断浏览
@@ -1048,7 +1179,7 @@ struct Index {
     const key = item.site_key ? item.site_key : (site !== null ? site.key : '');
     router.pushUrl({
       url: 'pages/Detail',
-      params: { key: key, vodId: String(item.vod_id) }
+      params: { key: key, vodId: String(item.vod_id), name: item.vod_name, pic: item.vod_pic }
     }).catch(() => {});
   }
 
@@ -1065,6 +1196,8 @@ struct Index {
     this.allTops = [];
     this.lockedTopCount = 0;
     this.subs = [];
+    this.ruleCats = [];
+    this.ruleObj = null;
     this.curTop = '';
     this.curClass = '';
     this.raw = [];
@@ -1145,7 +1278,7 @@ struct Index {
   /**
    * 顶栏的「资源站」下拉入口：直接显示当前站点名，右侧一个小三角。
    *
-   * 为什么不放图标：站名本身常带表情图标，再叠一个硬盘图标
+   * 为什么不放图标：站名本身就带表情图标（「🎬暴风资源」），再叠一个硬盘图标
    * 就是两个图标抢位置；而且十尺外看，站名比图标有用得多。
    */
   @Builder
@@ -1735,6 +1868,10 @@ struct Index {
         .padding({ bottom: 42 })
         .hitTestBehavior(HitTestMode.None)
       }
+
+      // 网页规则站的分类列表要在真页面里求值 XPath —— 没有这个隐藏 WebView，
+      // sniffer 的 waitReady 只能干等到超时再返回空，分类永远出不来。
+      SniffWeb()
     }
     .width('100%')
     .height('100%')

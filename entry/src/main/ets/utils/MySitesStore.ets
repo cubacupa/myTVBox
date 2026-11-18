@@ -183,6 +183,56 @@ export class MySitesStore {
     return msg + '（Default 现在共 ' + (next.length + 1) + ' 个站点）';
   }
 
+  /**
+   * 载入 Kazumi 规则时用：按 api 归一化后对照，
+   * 已有同一条就原地换新（规则内容可能被官方改过），没有就追加。
+   * 与 toggle 的区别在于不会把已存在的站点删掉。
+   */
+  static save(ctx: common.Context, s: SiteCfg): string {
+    if (!AppState.isUsable(s)) {
+      return '这个站点需要 spider 引擎，收进 Default 也播不了';
+    }
+    const api: string = (s.api ?? '').trim();
+    const key: string = MySitesStore.normApi(api);
+    if (key.length === 0) {
+      return '这个站点没有 api 地址，无法收进 Default';
+    }
+    if (key === MySitesStore.normApi(BuiltinConfig.BUILTIN_API)) {
+      return '这是 Default 自带的站点，不用再收';
+    }
+    const rec: MySiteRec = {
+      key: s.key,
+      name: s.name,
+      type: s.type,
+      api: api,
+      searchable: s.searchable,
+      quickSearch: s.quickSearch,
+      filterable: s.filterable
+    };
+    if ((s.ext ?? '').length > 0) {
+      rec.ext = s.ext;
+    }
+    const arr: MySiteRec[] = MySitesStore.read(ctx);
+    const next: MySiteRec[] = [];
+    let hit: boolean = false;
+    for (const r of arr) {
+      if (!hit && MySitesStore.normApi(r.api ?? '') === key) {
+        next.push(rec);
+        hit = true;
+      } else {
+        next.push(r);
+      }
+    }
+    if (!hit) {
+      next.push(rec);
+    }
+    if (!MySitesStore.write(ctx, next)) {
+      return '保存失败：本地文件写不进去';
+    }
+    const nm: string = (s.name ?? '').trim();
+    return (hit ? '已更新规则：' : '已加入 Default：') + (nm.length > 0 ? nm : api);
+  }
+
   private static read(ctx: common.Context): MySiteRec[] {
     const txt: string = FileStore.readText(ctx, F_MY);
     if (!txt) {

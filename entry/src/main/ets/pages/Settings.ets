@@ -1,5 +1,4 @@
 import { common } from '@kit.AbilityKit';
-import { pasteboard } from '@kit.BasicServicesKit';
 import { promptAction } from '@kit.ArkUI';
 import { AppState } from '../utils/AppState';
 import { ConfigStore } from '../utils/ConfigStore';
@@ -12,6 +11,7 @@ import { PinStore } from '../utils/PinStore';
 import { DoubanAuth } from '../utils/DoubanAuth';
 import { HttpUtil } from '../utils/HttpUtil';
 import { pushServer } from '../utils/PushServer';
+import { loadRuleSite } from '../utils/KazumiRuleApi';
 import { QrView } from '../components/QrView';
 import { SideNav } from '../components/SideNav';
 
@@ -56,8 +56,9 @@ interface DoubanMe {
  *
  * 两块左右并列、各占半屏；每块内部两行：
  *   第一行 = 名称 30% + 地址 70%（按 layoutWeight 3:7 分）
- *   第二行 = 粘贴 / 载入 / 清空 / 手机推送，占满整行并靠右对齐
- * 按钮不放第一行：半屏宽度下四个按钮会把地址输入框挤到几乎看不见。
+ *   第二行 = 载入 / 清空 / 手机推送，占满整行并靠右对齐
+ * 按钮不放第一行：半屏宽度下三个按钮会把地址输入框挤到几乎看不见。
+ * 点播源卡片底部另有一行 Kazumi 规则：填规则名或规则链接，回车即载入。
  */
 @Entry
 @Component
@@ -123,6 +124,10 @@ struct Settings {
   @State pushDiag: string = '';
   private pushTimer: number = -1;
 
+  // Kazumi 规则：直接填规则名或规则链接，回车即载入
+  @State ruleText: string = '';
+  @State ruleBusy: boolean = false;
+
   aboutToDisappear(): void {
     this.closePush();
   }
@@ -182,30 +187,6 @@ struct Settings {
     this.scanTip = '';
   }
 
-  // ---------- 输入辅助 ----------
-
-  private async pasteInto(isLive: boolean): Promise<void> {
-    try {
-      const board = pasteboard.getSystemPasteboard();
-      const data = await board.getData();
-      const text = data.getPrimaryText();
-      if (!text || text.length === 0) {
-        this.say('剪贴板里没有文字');
-        return;
-      }
-      if (isLive) {
-        this.liveAddr = text.trim();
-        this.suggestLiveName();
-      } else {
-        this.vodAddr = text.trim();
-        this.suggestVodName();
-      }
-      this.say('已从剪贴板粘贴到' + (isLive ? '直播源' : '点播源') + '，按「载入」生效');
-    } catch (e) {
-      this.say('粘贴失败：' + (e as Error).message);
-    }
-  }
-
   // ---------- 手机扫码推送 ----------
 
   /**
@@ -220,7 +201,7 @@ struct Settings {
     this.pushErr = '';
     this.pushMsg = '';
     this.pushOpen = true;
-    await pushServer.start(target === 'cookie' ? 'cookie' : 'addr');
+    await pushServer.start(target === 'cookie' || target === 'rule' ? target : 'addr');
     if (!pushServer.isRunning()) {
       this.pushErr = pushServer.error();
       return;
@@ -248,13 +229,15 @@ struct Settings {
         this.suggestLiveName();
       } else if (this.pushTarget === 'cookie') {
         this.doubanText = v;
+      } else if (this.pushTarget === 'rule') {
+        this.ruleText = v;
       } else {
         this.vodAddr = v;
         this.suggestVodName();
       }
       this.pushMsg = this.pushTarget === 'cookie'
         ? '收到 Cookie，回去点「保存并验证」'
-        : '收到，已填进输入框';
+        : (this.pushTarget === 'rule' ? '收到规则，回去点「载入」' : '收到，已填进输入框');
       this.stopPoll();
       setTimeout(() => {
         this.pushOpen = false;
@@ -571,23 +554,77 @@ struct Settings {
     this.pinMsg = 'PIN 已清除';
   }
 
-  // ---------- 豆瓣登录 ----------
+  // ---------- Kazumi 规则站 ----------
 
-  private async pasteCookie(): Promise<void> {
+  /**
+   * 填规则名（如 giriGiriLove）或规则链接（…/xxx.json），也能吃整段规则 JSON。
+   * 取到后收进 Default 并直接切过去，少一步点击。
+   */
+  private async loadRule(): Promise<void> {
+    if (this.ruleBusy) {
+      return;
+    }
+    const input: string = this.ruleText.trim();
+    if (input.length === 0) {
+      this.say('先填规则名或规则链接');
+      return;
+    }
+    this.ruleBusy = true;
     try {
-      const board = pasteboard.getSystemPasteboard();
-      const data = await board.getData();
-      const text = data.getPrimaryText();
-      if (!text || text.length === 0) {
-        this.doubanMsg = '剪贴板里没有文字';
+      const res = await loadRuleSite(input);
+      if (res.site === null) {
+        this.say(res.msg);
         return;
       }
-      this.doubanText = text.trim();
-      this.doubanMsg = '已从剪贴板粘贴，点「保存并验证」生效';
+      const ctx = getContext(this) as common.Context;
+      const site: SiteCfg = res.site;
+      const api: string = site.api ?? '';
+      // 同一条规则重复添加时按 api 认定，别加出两个一模一样的站点
+      const exist: SiteCfg | null = this.siteByApi(api);
+      let msg: string;
+      if (MySitesStore.contains(ctx, api)) {
+        msg = MySitesStore.save(ctx, site);   // 自己收过的：规则可能更新了，原地换新
+      } else if (exist !== null) {
+        msg = '「' + exist.name + '」已在 Default 里';
+      } else {
+        msg = MySitesStore.save(ctx, site);
+      }
+      // Default 是代码拼出来的，写盘后要重新解析一次，资源站列表才会多一行
+      if (BuiltinConfig.isBuiltin(AppState.configUrl)) {
+        ConfigStore.applyText(BuiltinConfig.text());
+        const fresh: SiteCfg | null = this.siteByApi(api);
+        if (fresh !== null) {
+          await ConfigStore.setSite(ctx, fresh);
+          msg += '，已切为当前站点';
+        }
+      } else {
+        msg += '（当前点播源不是 Default，切回 Default 才能看到）';
+      }
+      this.sync();
+      this.ruleText = '';
+      this.say(msg);
     } catch (e) {
-      this.doubanMsg = '粘贴失败：' + (e as Error).message;
+      this.say('载入规则失败：' + (e as Error).message);
+    } finally {
+      this.ruleBusy = false;
     }
   }
+
+  /** 按 api 在当前配置里找站点（含内置站），用于规则去重 */
+  private siteByApi(api: string): SiteCfg | null {
+    const key: string = MySitesStore.normApi(api);
+    if (key.length === 0) {
+      return null;
+    }
+    for (const s of AppState.usableSites()) {
+      if (MySitesStore.normApi(s.api ?? '') === key) {
+        return s;
+      }
+    }
+    return null;
+  }
+
+  // ---------- 豆瓣登录 ----------
 
   /**
    * 验证办法：dbcl2="<数字ID>:<hash>" 里带着豆瓣用户 ID，用这份 Cookie 打开
@@ -600,7 +637,7 @@ struct Settings {
     }
     const raw: string = this.doubanText.trim();
     if (raw.length === 0) {
-      this.doubanMsg = '先把 Cookie 粘贴进来';
+      this.doubanMsg = '先填入 Cookie';
       return;
     }
     const ctx = getContext(this) as common.Context;
@@ -754,7 +791,7 @@ struct Settings {
    * 输入框：按 3:7 分宽（名称 30% / 地址 70%），按钮另起一行右对齐。
    *
    * 注意：这里四个 builder 都不带参数。@Builder 的入参是值传递，父组件状态
-   * 变了不会重建节点 —— 带参数的话，点「粘贴」把地址写进 this.vodAddr，
+   * 变了不会重建节点 —— 带参数的话，手机推送把地址写进 this.vodAddr，
    * 输入框里会一直显示旧内容。
    */
   @Builder
@@ -765,6 +802,7 @@ struct Settings {
       .fontSize(14)
       .fontColor('#FFFFFF')
       .placeholderColor('#5C5C68')
+      .placeholderFont({ size: 14, weight: FontWeight.Normal })
       .backgroundColor(C_INPUT)
       .borderRadius(12)
       .border({ width: 1, color: '#20212A' })
@@ -780,6 +818,7 @@ struct Settings {
       .fontSize(14)
       .fontColor('#FFFFFF')
       .placeholderColor('#5C5C68')
+      .placeholderFont({ size: 14, weight: FontWeight.Normal })
       .backgroundColor(C_INPUT)
       .borderRadius(12)
       .border({ width: 1, color: '#20212A' })
@@ -798,6 +837,7 @@ struct Settings {
       .fontSize(14)
       .fontColor('#FFFFFF')
       .placeholderColor('#5C5C68')
+      .placeholderFont({ size: 14, weight: FontWeight.Normal })
       .backgroundColor(C_INPUT)
       .borderRadius(12)
       .border({ width: 1, color: '#20212A' })
@@ -813,6 +853,7 @@ struct Settings {
       .fontSize(14)
       .fontColor('#FFFFFF')
       .placeholderColor('#5C5C68')
+      .placeholderFont({ size: 14, weight: FontWeight.Normal })
       .backgroundColor(C_INPUT)
       .borderRadius(12)
       .border({ width: 1, color: '#20212A' })
@@ -839,11 +880,12 @@ struct Settings {
         Column() {
         this.pageHeader()
 
-        Scroll() {
-          Column() {
-            // ---------- 点播源 / 直播源：左右并列，各占半屏 ----------
-            Row() {
-              // ---------- 左：点播源 ----------
+        // 左右两栏各自独立滚动：某一栏内容少了不会被另一栏撑出空白
+        Row() {
+          // ---------- 左栏：点播 / 家长锁 / 接口 ----------
+          Scroll() {
+            Column({ space: 14 }) {
+              // ---------- 点播源 ----------
               Column() {
                 this.section('点播源 · 影视 / 剧集（站点 + 解析）')
 
@@ -856,13 +898,9 @@ struct Settings {
 
                 // 操作按钮另起一行：占满整行宽度后靠右对齐，挤在第一行会把地址框压没
                 Row() {
-                  Button('粘贴')
-                    .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#232530')
-                    .borderRadius(12)
-                    .onClick(() => { this.pasteInto(false); })
                   Button(this.busy === 'vod' ? '载入中…' : '载入')
                     .height(46).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
-                    .borderRadius(12).margin({ left: 10 })
+                    .borderRadius(12)
                     .onClick(() => { this.loadVod(); })
                   Button('清空')
                     .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
@@ -891,95 +929,55 @@ struct Settings {
                   Text('存储提示：' + this.errMsg)
                     .fontSize(12).fontColor('#FF9A9A').width('100%').margin({ top: 6 })
                 }
-              }
-              .layoutWeight(1)
-              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
-              .margin({ right: 8 })
-              .backgroundColor(C_CARD)
-              .borderRadius(20)
-              .border({ width: 1, color: C_LINE })
 
-              // ---------- 右：直播源 ----------
-              Column() {
-                this.section('直播源 · 电视频道（lives）')
+                // ---------- Kazumi 规则：填规则名或链接，回车即载入 ----------
+                Divider().color('#1A1B22').margin({ top: 14, bottom: 12 })
 
-                Row() {
-                  this.liveNameBox()
-                  Row().width(10)
-                  this.liveAddrBox()
-                }
-                .width('100%')
-
-                // 操作按钮另起一行：「跟随点播源」贴左，其余按钮靠右
-                Row() {
-                  if (this.liveOwn) {
-                    Button('跟随点播源')
-                      .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
-                      .borderRadius(12)
-                      .onClick(() => { this.backToVodLive(); })
-                  }
-                  Blank()
-                  Button('粘贴')
-                    .height(46).fontSize(14).fontColor('#FFFFFF').backgroundColor('#232530')
+                Row({ space: 10 }) {
+                  Text('Kazumi 规则')
+                    .fontSize(13).fontColor('#8E8E9A')
+                    .maxLines(1)
+                  TextInput({
+                    text: this.ruleText,
+                    placeholder: '规则名或规则链接，如 giriGiriLove'
+                  })
+                    .layoutWeight(1)
+                    .height(46)
+                    .fontSize(13)
+                    .fontColor('#FFFFFF')
+                    .placeholderColor('#5C5C68')
+                    // 不显式给占位符字号，它会回落到系统默认 16fp，比正文粗大一截
+                    .placeholderFont({ size: 13, weight: FontWeight.Normal })
+                    .backgroundColor(C_INPUT)
                     .borderRadius(12)
-                    .onClick(() => { this.pasteInto(true); })
-                  Button(this.busy === 'live' ? '载入中…' : '载入')
+                    .border({ width: 1, color: '#20212A' })
+                    .padding({ left: 14, right: 14 })
+                    .enterKeyType(EnterKeyType.Go)
+                    .onChange((v: string) => { this.ruleText = v; })
+                    .onSubmit(() => { this.loadRule(); })
+                  Button(this.ruleBusy ? '载入中…' : '载入')
                     .height(46).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
-                    .borderRadius(12).margin({ left: 10 })
-                    .onClick(() => { this.loadLiveSrc(); })
+                    .borderRadius(12)
+                    .onClick(() => { this.loadRule(); })
                   Button('清空')
                     .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
-                    .borderRadius(12).margin({ left: 10 })
-                    .onClick(() => { this.clearLiveInput(); })
+                    .borderRadius(12)
+                    .onClick(() => { this.ruleText = ''; })
                   Button('手机推送')
                     .height(46).fontSize(13).fontColor('#8ED0FF').backgroundColor('#152B33')
-                    .borderRadius(12).margin({ left: 10 })
-                    .onClick(() => { this.openPush('live'); })
+                    .borderRadius(12)
+                    .onClick(() => { this.openPush('rule'); })
                 }
                 .width('100%')
-                .margin({ top: 10 })
-
-                // 状态行独占一行；源名清单另开一行，别让它贴着「当前：…」把这句话挤成两截。
-                Text(this.liveOwn
-                  ? '当前：独立直播源「' + (this.liveName.length > 0 ? this.liveName : '未命名')
-                    + '」· 直播列表 ' + this.lives.length + ' 个'
-                  : '当前：跟随点播源「' + (this.configName.length > 0 ? this.configName : '未命名')
-                    + '」· 直播列表 ' + this.lives.length + ' 个')
-                  .fontSize(13)
-                  .fontColor('#8E8E9A')
-                  .width('100%')
-                  .margin({ top: 6 })
-
-                if (this.lives.length > 0) {
-                  Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-                    ForEach(this.lives, (l: LiveCfg, idx: number) => {
-                      Text(l.name + (LiveSrcProbe.isBad(l.url) ? ' · 空' : ''))
-                        .fontSize(12.5)
-                        .fontColor(LiveSrcProbe.isBad(l.url) ? '#6b6b6b' : '#cccccc')
-                        .backgroundColor(LiveSrcProbe.isBad(l.url) ? '#101116' : '#1A1B22')
-                        .borderRadius(8)
-                        .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-                        .margin({ right: 8, top: 6 })
-                    }, (l: LiveCfg, idx: number) => l.name + String(idx))
-                  }
-                  .width('100%')
-                  .margin({ top: 2 })
-                }
+                .margin({ top: 2 })
+                .alignItems(VerticalAlign.Center)
               }
-              .layoutWeight(1)
+              .width('100%')
               .padding({ left: 20, right: 20, top: 6, bottom: 18 })
-              .margin({ left: 8 })
               .backgroundColor(C_CARD)
               .borderRadius(20)
               .border({ width: 1, color: C_LINE })
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Top)
-            .margin({ top: 14 })
-
-            // ---------- 家长锁 / 豆瓣账号：左右并列，各占半屏 ----------
-            Row() {
-              // ---------- 左：家长锁 4 位 PIN ----------
+              // ---------- 家长锁 4 位 PIN ----------
               Column() {
                 this.section('家长锁 · 4 位 PIN')
 
@@ -987,6 +985,7 @@ struct Settings {
                   TextInput({ text: this.pinText, placeholder: '4 位数字' })
                     .width(190).height(44).fontSize(15)
                     .fontColor('#FFFFFF').placeholderColor('#5C5C68')
+                    .placeholderFont({ size: 15, weight: FontWeight.Normal })
                     .backgroundColor('#14151C').borderRadius(12)
                     // 数字键盘 + 圆点掩码：PIN 不明文显示
                     .type(InputType.NUMBER_PASSWORD)
@@ -1015,70 +1014,12 @@ struct Settings {
                   Text(this.pinMsg).fontSize(13).fontColor('#7FD88A').width('100%').margin({ top: 6 })
                 }
               }
-              .layoutWeight(1)
+              .width('100%')
               .padding({ left: 20, right: 20, top: 6, bottom: 18 })
-              .margin({ right: 8 })
               .backgroundColor(C_CARD)
               .borderRadius(20)
               .border({ width: 1, color: C_LINE })
-
-              // ---------- 右：豆瓣账号（可选） ----------
-              Column() {
-                this.section('豆瓣账号（可选）· 提高抓取配额')
-
-                TextInput({ text: this.doubanText, placeholder: '粘贴 Cookie（含 dbcl2=…）' })
-                  .width('100%').height(46).fontSize(14)
-                  .fontColor('#FFFFFF').placeholderColor('#5C5C68')
-                  .backgroundColor('#14151C').borderRadius(12)
-                  .onChange((v: string) => { this.doubanText = v; })
-
-                Row() {
-                  Button('粘贴')
-                    .height(42).fontSize(14).fontColor('#FFFFFF').backgroundColor('#232530')
-                    .borderRadius(12)
-                    .onClick(() => { this.pasteCookie(); })
-                  Button('手机推送')
-                    .height(42).fontSize(13).fontColor('#8ED0FF').backgroundColor('#152B33')
-                    .borderRadius(12).margin({ left: 10 })
-                    .onClick(() => { this.openPush('cookie'); })
-                  Button(this.doubanBusy ? '验证中…' : '保存并验证')
-                    .height(42).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
-                    .borderRadius(12).margin({ left: 10 })
-                    .onClick(() => { this.saveCookie(); })
-                  if (this.doubanHas) {
-                    Button('退出登录')
-                      .height(42).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
-                      .borderRadius(12).margin({ left: 10 })
-                      .onClick(() => { this.clearCookie(); })
-                  }
-                  Text('● ' + (this.doubanHas ? this.doubanInfo : '未登录'))
-                    .fontSize(14).fontColor(this.doubanHas ? '#7FD88A' : '#7E7E8A')
-                    .margin({ left: 16 })
-                    .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .layoutWeight(1)
-                }
-                .width('100%')
-                .justifyContent(FlexAlign.End)
-                .margin({ top: 10 })
-
-                if (this.doubanMsg) {
-                  Text(this.doubanMsg).fontSize(13).fontColor('#7FD88A').width('100%').margin({ top: 6 })
-                }
-              }
-              .layoutWeight(1)
-              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
-              .margin({ left: 8 })
-              .backgroundColor(C_CARD)
-              .borderRadius(20)
-              .border({ width: 1, color: C_LINE })
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Top)
-            .margin({ top: 14 })
-
-            // ---------- 已保存的接口 / 资源站：左右并列 ----------
-            Row() {
-              // ---------- 左：已保存的接口 + 多仓仓库 ----------
+              // ---------- 已保存的接口 + 多仓仓库 ----------
               Column() {
                 if (this.saved.length > 0) {
                   this.section('已保存的接口')
@@ -1197,15 +1138,138 @@ struct Settings {
                   }, (r: RepoScanResult, idx: number) => idx + '|' + r.url)
                 }
               }
-              .layoutWeight(1)
+              .width('100%')
               .padding({ left: 20, right: 20, top: 6, bottom: 18 })
-              .margin({ right: 8 })
               .backgroundColor(C_CARD)
               .borderRadius(20)
               .border({ width: 1, color: C_LINE })
               .alignItems(HorizontalAlign.Start)
+            }
+            .width('100%')
+            .padding({ left: 44, right: 8, top: 14, bottom: 34 })
+          }
+          .layoutWeight(1)
+          .height('100%')
+          .align(Alignment.TopStart)
+          .scrollBar(BarState.Off)
 
-              // ---------- 右：资源站（只列可用） ----------
+          // ---------- 右栏：直播 / 豆瓣 / 资源站 ----------
+          Scroll() {
+            Column({ space: 14 }) {
+              // ---------- 直播源 ----------
+              Column() {
+                this.section('直播源 · 电视频道（lives）')
+
+                Row() {
+                  this.liveNameBox()
+                  Row().width(10)
+                  this.liveAddrBox()
+                }
+                .width('100%')
+
+                // 操作按钮另起一行：「跟随点播源」贴左，其余按钮靠右
+                Row() {
+                  if (this.liveOwn) {
+                    Button('跟随点播源')
+                      .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
+                      .borderRadius(12)
+                      .onClick(() => { this.backToVodLive(); })
+                  }
+                  Blank()
+                  Button(this.busy === 'live' ? '载入中…' : '载入')
+                    .height(46).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
+                    .borderRadius(12)
+                    .onClick(() => { this.loadLiveSrc(); })
+                  Button('清空')
+                    .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
+                    .borderRadius(12).margin({ left: 10 })
+                    .onClick(() => { this.clearLiveInput(); })
+                  Button('手机推送')
+                    .height(46).fontSize(13).fontColor('#8ED0FF').backgroundColor('#152B33')
+                    .borderRadius(12).margin({ left: 10 })
+                    .onClick(() => { this.openPush('live'); })
+                }
+                .width('100%')
+                .margin({ top: 10 })
+
+                // 状态行独占一行；源名清单另开一行，别让它贴着「当前：…」把这句话挤成两截。
+                Text(this.liveOwn
+                  ? '当前：独立直播源「' + (this.liveName.length > 0 ? this.liveName : '未命名')
+                    + '」· 直播列表 ' + this.lives.length + ' 个'
+                  : '当前：跟随点播源「' + (this.configName.length > 0 ? this.configName : '未命名')
+                    + '」· 直播列表 ' + this.lives.length + ' 个')
+                  .fontSize(13)
+                  .fontColor('#8E8E9A')
+                  .width('100%')
+                  .margin({ top: 6 })
+
+                if (this.lives.length > 0) {
+                  Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+                    ForEach(this.lives, (l: LiveCfg, idx: number) => {
+                      Text(l.name + (LiveSrcProbe.isBad(l.url) ? ' · 空' : ''))
+                        .fontSize(12.5)
+                        .fontColor(LiveSrcProbe.isBad(l.url) ? '#6b6b6b' : '#cccccc')
+                        .backgroundColor(LiveSrcProbe.isBad(l.url) ? '#101116' : '#1A1B22')
+                        .borderRadius(8)
+                        .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+                        .margin({ right: 8, top: 6 })
+                    }, (l: LiveCfg, idx: number) => l.name + String(idx))
+                  }
+                  .width('100%')
+                  .margin({ top: 2 })
+                }
+              }
+              .width('100%')
+              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
+              .backgroundColor(C_CARD)
+              .borderRadius(20)
+              .border({ width: 1, color: C_LINE })
+              // ---------- 豆瓣账号（可选） ----------
+              Column() {
+                this.section('豆瓣账号（可选）· 提高抓取配额')
+
+                TextInput({ text: this.doubanText, placeholder: 'Cookie（含 dbcl2=…）' })
+                  .width('100%').height(46).fontSize(14)
+                  .fontColor('#FFFFFF').placeholderColor('#5C5C68')
+                  .placeholderFont({ size: 14, weight: FontWeight.Normal })
+                  .backgroundColor('#14151C').borderRadius(12)
+                  .onChange((v: string) => { this.doubanText = v; })
+
+                Row() {
+                  Button('手机推送')
+                    .height(42).fontSize(13).fontColor('#8ED0FF').backgroundColor('#152B33')
+                    .borderRadius(12)
+                    .onClick(() => { this.openPush('cookie'); })
+                  Button(this.doubanBusy ? '验证中…' : '保存并验证')
+                    .height(42).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
+                    .borderRadius(12).margin({ left: 10 })
+                    .onClick(() => { this.saveCookie(); })
+                  if (this.doubanHas) {
+                    Button('退出登录')
+                      .height(42).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
+                      .borderRadius(12).margin({ left: 10 })
+                      .onClick(() => { this.clearCookie(); })
+                  }
+                  Text('● ' + (this.doubanHas ? this.doubanInfo : '未登录'))
+                    .fontSize(14).fontColor(this.doubanHas ? '#7FD88A' : '#7E7E8A')
+                    .margin({ left: 16 })
+                    .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .layoutWeight(1)
+                }
+                .width('100%')
+                .justifyContent(FlexAlign.End)
+                .margin({ top: 10 })
+
+                if (this.doubanMsg) {
+                  Text(this.doubanMsg).fontSize(13).fontColor('#7FD88A').width('100%').margin({ top: 6 })
+                }
+              }
+              .width('100%')
+              .padding({ left: 20, right: 20, top: 6, bottom: 18 })
+              .backgroundColor(C_CARD)
+              .borderRadius(20)
+              .border({ width: 1, color: C_LINE })
+              // ---------- 资源站（只列可用） ----------
               Column() {
                 if (this.sites.length > 0) {
                   this.section('资源站（选一个作为当前点播站点）')
@@ -1251,26 +1315,24 @@ struct Settings {
                 }
 
               }
-              .layoutWeight(1)
+              .width('100%')
               .padding({ left: 20, right: 20, top: 6, bottom: 18 })
-              .margin({ left: 8 })
               .backgroundColor(C_CARD)
               .borderRadius(20)
               .border({ width: 1, color: C_LINE })
               .alignItems(HorizontalAlign.Start)
             }
             .width('100%')
-            .alignItems(VerticalAlign.Top)
-            .margin({ top: 14 })
-
+            .padding({ left: 8, right: 36, top: 14, bottom: 34 })
           }
-          .width('100%')
-          .padding({ left: 44, right: 36, bottom: 34 })
+          .layoutWeight(1)
+          .height('100%')
+          .align(Alignment.TopStart)
+          .scrollBar(BarState.Off)
         }
         .layoutWeight(1)
         .width('100%')
-        .align(Alignment.Top)
-        .scrollBar(BarState.Off)
+        .alignItems(VerticalAlign.Top)
         }
         .layoutWeight(1)
         .height('100%')
@@ -1370,7 +1432,8 @@ struct Settings {
         Column() {
           Column() {
             Text(this.pushTarget === 'live' ? '手机推送 · 直播源'
-              : (this.pushTarget === 'cookie' ? '手机推送 · 豆瓣 Cookie' : '手机推送 · 点播源'))
+              : (this.pushTarget === 'cookie' ? '手机推送 · 豆瓣 Cookie'
+                : (this.pushTarget === 'rule' ? '手机推送 · Kazumi 规则' : '手机推送 · 点播源')))
               .fontSize(19).fontColor('#FFFFFF').fontWeight(FontWeight.Bold)
 
             if (this.pushErr.length > 0) {
@@ -1384,8 +1447,10 @@ struct Settings {
               .margin({ top: 18 })
             } else {
               Text(this.pushTarget === 'cookie'
-                ? '手机连同一个 Wi-Fi → 扫码 → 粘贴 Cookie → 点推送'
-                : '手机连同一个 Wi-Fi → 扫码 → 粘贴地址 → 点推送')
+                ? '手机连同一个 Wi-Fi → 扫码 → 填 Cookie → 点推送'
+                : (this.pushTarget === 'rule'
+                  ? '手机连同一个 Wi-Fi → 扫码 → 填规则名或链接 → 点推送'
+                  : '手机连同一个 Wi-Fi → 扫码 → 填地址 → 点推送'))
                 .fontSize(13).fontColor('#8E8E9A').margin({ top: 8 })
               QrView({ content: this.pushUrl, box: 240 })
                 .margin({ top: 12 })
@@ -1418,6 +1483,7 @@ struct Settings {
         .backgroundColor('#B3000000')
         .justifyContent(FlexAlign.Center)
       }
+
     }
     .width('100%')
     .height('100%')

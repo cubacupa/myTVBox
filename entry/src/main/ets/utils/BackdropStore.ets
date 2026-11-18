@@ -299,6 +299,12 @@ export class BackdropStore {
     const items: BdSearchItem[] = box !== undefined && box.items !== undefined ? box.items : [];
     const want: string = PosterStore.baseOf(q).replace(/\s+/g, '');
     let loose: string = '';
+    // 同名条目要按年份挑：豆瓣《来自远方》有 2021 美国歌舞 / 2026 日本动画 / 2015 委内瑞拉
+    // 三条，只按片名取第一条就会把番剧的铺底剧照换成欧美片。
+    // 命中规则：年份对上 → 直接用它；只有唯一一条同名 → 可以用；
+    // 多条同名且年份各不相同、又没有年份确认 → 放弃（宁可不铺图，也不铺错）。
+    let exactId: string = '';
+    let exactTitleCount: number = 0;
     for (let i = 0; i < items.length; i++) {
       const tg: BdSearchTarget | undefined = items[i].target;
       if (tg === undefined) {
@@ -313,10 +319,21 @@ export class BackdropStore {
       }
       const title: string = PosterStore.baseOf(PosterStore.cleanTitle(tg.title ?? ''))
         .replace(/\s+/g, '');
+      if (title !== want) {
+        continue;
+      }
       const y: string = (tg.year ?? '').trim();
-      if (title === want && (year.length === 0 || y.length === 0 || y === year)) {
+      if (year.length > 0 && y.length > 0 && y === year) {
         return id;
       }
+      if (exactId.length === 0) {
+        exactId = id;
+      }
+      exactTitleCount++;
+    }
+    // 只有一条同名条目：不用年份也能确定是它
+    if (exactTitleCount === 1) {
+      return exactId;
     }
     // 没有精确命中就不用：宁可不显示铺底图，也不能铺错一部片的剧照
     if (loose.length > 0) {

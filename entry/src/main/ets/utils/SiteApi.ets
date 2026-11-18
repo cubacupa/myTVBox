@@ -1,6 +1,7 @@
 import { HttpUtil } from './HttpUtil';
 import { SiteCfg, PlayLine } from '../model/TvBoxModels';
 import { VodItem, VodDetail, VodClass, VodEpisode } from '../model/VodItem';
+import { KazumiRuleApi, parseKazumiRule, KazumiListResult, KazumiRule } from './KazumiRuleApi';
 
 /**
  * 站点协议适配：苹果CMS V10 JSON 接口（TVBox 里绝大多数 http 型站点都是这套）。
@@ -40,7 +41,46 @@ export class SiteApi {
     return base + sep + query;
   }
 
+  /**
+   * type=9：Kazumi 风格 API 规则站（ext 里放规则 JSON）。
+   * 这类规则只有「按关键词搜索」和「按 source 取详情」，没有苹果CMS 的分类/list 接口。
+   * 造一个虚拟分类「全部番剧」：getList 用空关键词调搜索接口，等于浏览全库。
+   */
+  private static isKazumi(site: SiteCfg): boolean {
+    return site.type === 9;
+  }
+
+  /** 虚拟分类的 type_id：仅用于让点播页有分类可选，真正请求时忽略 */
+  private static readonly KAZUMI_ALL_ID: string = '__kazumi_all__';
+
+  private static ruleOf(site: SiteCfg) {
+    return parseKazumiRule(site.ext ?? '');
+  }
+
+  /** 给分类浏览这类页面用的公开入口：拿当前站点的规则（非规则站返回 null） */
+  static ruleFor(site: SiteCfg): KazumiRule | null {
+    if (!SiteApi.isKazumi(site)) {
+      return null;
+    }
+    return SiteApi.ruleOf(site);
+  }
+
+  /**
+   * 网页（XPath）模式的规则站：搜索、详情都要在隐藏 WebView 里真跑一遍页面，
+   * 一次要好几秒。聚合搜索里跳过它们，否则一个站就能把整轮搜索拖到十几秒。
+   */
+  static isWebRule(site: SiteCfg): boolean {
+    if (!SiteApi.isKazumi(site)) {
+      return false;
+    }
+    return KazumiRuleApi.isXPathRule(SiteApi.ruleOf(site));
+  }
+
   static async getClasses(site: SiteCfg): Promise<VodClass[]> {
+    if (SiteApi.isKazumi(site)) {
+      const all: VodClass = { type_id: SiteApi.KAZUMI_ALL_ID, type_name: '最新更新' };
+      return [all];
+    }
     const url = SiteApi.buildUrl(site.api, 'ac=list');
     const data = await HttpUtil.getJson<CmsResp>(url);
     return data.class ?? [];
@@ -48,6 +88,37 @@ export class SiteApi {
 
   // extra 为筛选参数串（area=大陆&year=2026），为空则不带
   static async getList(site: SiteCfg, typeId: string, page: number, extra: string): Promise<VodListResult> {
+    if (SiteApi.isKazumi(site)) {
+      const r = SiteApi.ruleOf(site);
+      if (r === null || (!KazumiRuleApi.isApiRule(r) && !KazumiRuleApi.isXPathRule(r))) {
+        return { items: [], page: page, pageCount: 1, total: 0 };
+      }
+      // 网页模式规则没有分类接口。这类站基本都是 macCMS，模板自带
+      // index.php/ajax/data（只认 page/limit，回全库按更新时间倒序），
+      // 优先用它做全库浏览；接口关掉时才退回「空关键词搜一次」的老办法。
+      if (!KazumiRuleApi.isApiRule(r)) {
+        const cms: KazumiListResult | null = await KazumiRuleApi.browseCms(r, page);
+        if (cms !== null) {
+          return {
+            items: cms.items,
+            page: page,
+            pageCount: cms.pageCount ?? 1,
+            total: cms.total
+          };
+        }
+        if (page > 1) {
+          return { items: [], page: page, pageCount: 1, total: 0 };
+        }
+      }
+      const got = await KazumiRuleApi.search(r, '', page);
+      if (!KazumiRuleApi.isApiRule(r)) {
+        return { items: got.items, page: 1, pageCount: 1, total: got.items.length };
+      }
+      const q: Record<string, Object> = r.searchApi === null ? {} : (r.searchApi.query ?? {});
+      const limit: number = Number(q['limit'] ?? 24) || 24;
+      const pageCount: number = got.total > 0 ? Math.ceil(got.total / limit) : 1;
+      return { items: got.items, page: page, pageCount: pageCount, total: got.total };
+    }
     let q = typeId
       ? ('ac=videolist&t=' + typeId + '&pg=' + page)
       : ('ac=videolist&pg=' + page);
@@ -65,6 +136,14 @@ export class SiteApi {
   }
 
   static async search(site: SiteCfg, wd: string, page: number): Promise<VodListResult> {
+    if (SiteApi.isKazumi(site)) {
+      const r = SiteApi.ruleOf(site);
+      if (r === null || (!KazumiRuleApi.isApiRule(r) && !KazumiRuleApi.isXPathRule(r))) {
+        return { items: [], page: page, pageCount: 1, total: 0 };
+      }
+      const got = await KazumiRuleApi.search(r, wd, page);
+      return { items: got.items, page: page, pageCount: 1, total: got.total };
+    }
     const q = 'ac=videolist&wd=' + encodeURIComponent(wd) + '&pg=' + page;
     const data = await HttpUtil.getJson<CmsResp>(SiteApi.buildUrl(site.api, q));
     const r: VodListResult = {
@@ -77,6 +156,13 @@ export class SiteApi {
   }
 
   static async getDetail(site: SiteCfg, ids: string): Promise<VodDetail | null> {
+    if (SiteApi.isKazumi(site)) {
+      const r = SiteApi.ruleOf(site);
+      if (r === null || (!KazumiRuleApi.isApiRule(r) && !KazumiRuleApi.isXPathRule(r))) {
+        return null;
+      }
+      return await KazumiRuleApi.getDetail(r, ids);
+    }
     const url = SiteApi.buildUrl(site.api, 'ac=detail&ids=' + ids);
     const data = await HttpUtil.getJson<CmsResp>(url);
     if (data.list && data.list.length > 0) {

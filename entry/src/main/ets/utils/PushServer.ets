@@ -352,6 +352,7 @@ export class PushServer {
   /** 手机端页面。样式尽量素，电视上看着小、手机上看着舒服就行 */
   private page(): string {
     const cookie: boolean = this.kindStr === 'cookie';
+    const rule: boolean = this.kindStr === 'rule';
     let h = '<!doctype html><html lang=zh><head><meta charset=utf-8>';
     h += '<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">';
     h += '<title>推送到电视</title><style>';
@@ -367,14 +368,22 @@ export class PushServer {
     h += 'button:disabled{opacity:.55}';
     h += '#s{margin-top:14px;font-size:15px;min-height:22px;color:#999}';
     h += '</style></head><body>';
-    h += '<h1>' + (cookie ? '推送豆瓣 Cookie' : '推送到电视') + '</h1>';
-    h += cookie
-      ? '<p class=tip>在电脑或手机浏览器登录豆瓣 → 开发者工具 Network → 随便点一个请求 → '
-        + '复制它的 Cookie 请求头，粘到下面。</p>'
-      : '<p class=tip>粘贴你复制的接口地址，点下面按钮，电视上会自动填进输入框。</p>';
-    h += cookie
-      ? '<textarea id=t placeholder=\'bid=abc123; dbcl2="1234567:xxxx"\'></textarea>'
-      : '<textarea id=t placeholder="https://example.com/config.json"></textarea>';
+    h += '<h1>' + (cookie ? '推送豆瓣 Cookie' : (rule ? '推送 Kazumi 规则' : '推送到电视')) + '</h1>';
+    if (cookie) {
+      h += '<p class=tip>在电脑或手机浏览器登录豆瓣 → 开发者工具 Network → 随便点一个请求 → '
+        + '复制它的 Cookie 请求头，粘到下面。</p>';
+    } else if (rule) {
+      h += '<p class=tip>粘贴 Kazumi 规则链接（…/giriGiriLove.json），或直接填规则名，点按钮送到电视。</p>';
+    } else {
+      h += '<p class=tip>粘贴你复制的接口地址，点下面按钮，电视上会自动填进输入框。</p>';
+    }
+    if (cookie) {
+      h += '<textarea id=t placeholder=\'bid=abc123; dbcl2="1234567:xxxx"\'></textarea>';
+    } else if (rule) {
+      h += '<textarea id=t placeholder="giriGiriLove 或 https://.../giriGiriLove.json"></textarea>';
+    } else {
+      h += '<textarea id=t placeholder="https://example.com/config.json"></textarea>';
+    }
     h += '<button id=b>' + (cookie ? '推送 Cookie' : '推送到电视') + '</button><p id=s></p>';
     h += '<script>';
     h += 'var TK="' + this.tokenStr + '";';

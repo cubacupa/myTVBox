@@ -3,6 +3,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { HttpUtil } from './HttpUtil';
 import { DoubanAuth } from './DoubanAuth';
+import { ImageCache } from './ImageCache';
 import { VodItem } from '../model/VodItem';
 
 /**
@@ -104,7 +105,7 @@ const MAX_FILES: number = 600;
 const MAX_TRY: number = 2;
 /**
  * 按名搜索队列的总长度上限。
- * 片库里大量片子没有 douban_id，首页 warm 一次就能灌 150+，
+ * 新加的采集站（如醉影4K 212 部）大多没有 douban_id，首页 warm 一次就能灌 150+，
  * 串行 1.2s/部要跑好几分钟，首屏那批反而迟迟出不来图。
  * 限到 60：首屏/当前页先出图，靠后的等翻页或下次进页面时再入队（不永久丢弃）。
  */
@@ -254,6 +255,8 @@ export class PosterStore {
 
   static init(ctx: common.Context): void {
     PosterStore.ctx = ctx;
+    // 外链图片本地化通道跟着海报一起初始化：列表里站点自带的海报走它
+    ImageCache.init(ctx);
     if (PosterStore.inited) {
       return;
     }
@@ -387,10 +390,11 @@ export class PosterStore {
 
   /**
    * 缓存 key：剧名哈希 + 季号后缀（q3 = 第 3 季）。
-   * 前缀 n2 是「片名缓存版本」：年份匹配规则改过一次（补搜「片名+年份」），
-   * 旧缓存里只有哈希、没存年份，无法逐条校验是否配错片，只能整代作废重刮；
-   * 带 douban_id 的缓存走 d+id，不受影响。
-   * 带季号的片名换成新 key，正好把以前"错季"的缓存数据架空、重新取一遍正确的。
+   * 前缀 n3 是「片名缓存版本」，每次"按名匹配"的判定规则有实质改动就 +1：
+   *   n2 → n3（2026-11-17）：Kazumi 规则站以前没把 vod_year 传进来，按名刮到的封面/剧照
+   *   全是"同名但不同片"的错图（番剧《来自远方》被配成 2021 美国歌舞片，连 9.2 分一起错）。
+   *   错图已经落盘，没法逐条判断对错，只能整代 key 作废重刮；
+   * 带 douban_id 的缓存走 d+id，不受影响；剧照 key 是 'b' + 本 key，也会同步换代。
    */
   private static nameKey(item: VodItem): string {
     const full: string = PosterStore.cleanTitle(item.vod_name ?? '');
@@ -398,7 +402,7 @@ export class PosterStore {
     if (base.length === 0) {
       return '';
     }
-    const k: string = 'n2' + PosterStore.hashName(PosterStore.squash(base));
+    const k: string = 'n3' + PosterStore.hashName(PosterStore.squash(base));
     const sn: number = PosterStore.seasonOf(full);
     return sn > 0 ? k + 'q' + sn.toString() : k;
   }
@@ -567,7 +571,7 @@ export class PosterStore {
       if (dup) {
         continue;
       }
-      // 队列到上限就不再灌，靠后的片等用户翻页/下次进页面时再入队。
+      // A：队列到上限就不再灌，靠后的片等用户翻页/下次进页面时再入队。
       // 用 break 而不是跳过：items 通常按首屏顺序排，超出的整段延后，保住当前页优先出图。
       // 两条路径（补图补分 / 纯补分）统一受限，避免任一路径绕过上限重新灌爆队列；
       // dup 检查已保证不重复入队，满额时新片自然顺延到下一次 warm。
@@ -1042,6 +1046,13 @@ export class PosterStore {
     if (wBase.length === 0) {
       return null;
     }
+    // 同名多条目、又没有年份能确认时，直接放弃——错配的封面比没封面更误导人。
+    // 实例：《来自远方》在豆瓣有 2021 美国歌舞（9.2 分）/ 2026 日本动画 / 2015 委内瑞拉
+    // 三条同名条目，光看片名只能取排第一的那条，番剧就被配成欧美片的封面和剧照。
+    if (PosterStore.ambiguousTitle(list, wBase, year)) {
+      hilog.info(DOMAIN, TAG, 'ambiguous title, skip: %{public}s', want);
+      return null;
+    }
     const wSeason: number = PosterStore.seasonOf(want);
     const y: string = year.trim();
     const hit: SuggestTarget | null = PosterStore.scanCands(list, wBase, wSeason, y, false);
@@ -1064,6 +1075,40 @@ export class PosterStore {
       }
     }
     return null;
+  }
+
+  /**
+   * 候选里是否存在「同名但年份各不相同」的歧义，且没有一条能用目标年份确认。
+   *
+   * 判定：
+   *   - 片名一致的候选少于 2 条 → 不歧义
+   *   - 其中有一条年份正好等于目标年份 → 已确认，不歧义（交给 pick 正常返回）
+   *   - 这些候选的年份全相同（或全为空）→ 视为同一部片的不同条目，不歧义
+   *   - 其余情况（≥2 条同名、年份互不相同、目标年份对不上任何一条）→ 歧义
+   */
+  private static ambiguousTitle(list: SuggestTarget[], wBase: string, year: string): boolean {
+    const y: string = (year ?? '').trim();
+    const years: string[] = [];
+    let same: number = 0;
+    for (let i = 0; i < list.length; i++) {
+      const t: string = PosterStore.cleanTitle(list[i].title ?? '');
+      const b: string = PosterStore.squash(PosterStore.baseOf(t));
+      if (b !== wBase) {
+        continue;
+      }
+      same++;
+      const cy: string = (list[i].year ?? '').trim();
+      if (y.length > 0 && cy === y) {
+        return false;   // 有年份确认，交给正常匹配流程
+      }
+      if (cy.length > 0 && years.indexOf(cy) < 0) {
+        years.push(cy);
+      }
+    }
+    if (same < 2) {
+      return false;
+    }
+    return years.length >= 2;
   }
 
   /** pick 的一轮：同一组候选按季号可信度从高到低扫（注意别和缓存扫描 scan() 重名） */

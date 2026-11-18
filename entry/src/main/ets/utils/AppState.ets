@@ -56,9 +56,14 @@ export class AppState {
     return n;
   }
 
-  /** api 是否是可直接请求的 http 接口（排除指向 js/jar/py 脚本的） */
+  /** api 是否是可直接请求的接口（http 接口，或 kazumi 规则站） */
   static isHttpApi(s: SiteCfg): boolean {
     const low = (s.api ?? '').trim().toLowerCase();
+    // type=9 是 Kazumi API 规则站：规则 JSON 放在 ext 里，api 只是 kazumi:// 伪协议，
+    // 不走 http，SiteApi 会分流到 KazumiRuleApi。别被下面的 http 校验挡掉。
+    if (s.type === 9 && low.startsWith('kazumi://')) {
+      return true;
+    }
     if (!low.startsWith('http')) {
       // csp_xxx 这类是 spider 类名，必须 jar 才能跑
       return false;
@@ -73,9 +78,9 @@ export class AppState {
     if (!AppState.isHttpApi(s)) {
       return false;
     }
-    // type 0 = XML、1 = JSON 采集接口；3/4 需要 spider 运行时（jar 或 JS 引擎），
-    // 鸿蒙 NEXT 没有 JVM 和 drpy 运行环境，一律不可用（按需求直接过滤、不展示）。
-    return s.type === 0 || s.type === 1;
+    // type 0 = XML、1 = JSON 采集接口、9 = Kazumi API 规则站；3/4 需要 spider 运行时
+    // （jar 或 JS 引擎），鸿蒙 NEXT 没有 JVM 和 drpy 运行环境，一律过滤、不展示。
+    return s.type === 0 || s.type === 1 || s.type === 9;
   }
 
   static findSite(key: string): SiteCfg | null {

@@ -10,6 +10,8 @@ import { PosterStore } from '../utils/PosterStore';
 import { RatingStore } from '../utils/RatingStore';
 import { LiveMarkStore } from '../utils/LiveMarkStore';
 import { AppState } from '../utils/AppState';
+import { SniffWeb } from '../components/SniffWeb';
+import { sniffer } from '../utils/WebSniffer';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'TVBoxPlayer';
@@ -303,9 +305,7 @@ struct Player {
     this.resolving = false;
     if (!playUrl) {
       this.connecting = false;
-      this.errMsg = '拿不到可播放的地址。原始地址不是直链（m3u8/mp4），'
-        + '页面里也没找到播放流，可能该源需要在手机/电视上用专用的 spider 引擎：\n'
-        + this.rawUrl;
+      this.errMsg = '这条线路取不到播放地址，换一条线路试试\n' + this.rawUrl;
       return;
     }
     this.playUrl = playUrl;
@@ -433,7 +433,30 @@ struct Player {
           }
         }
       });
-      p.url = url;
+      // 抓来的流地址大多验 Referer（直接请求会 410），把嗅探时记录的页面带上。
+      // 例外：带签名的 CDN 直链（腾讯 dis_k、天翼云 X-Amz-* 等）鉴权已在 URL 里，
+      // 再带 Referer 反而命中防盗链返回 404（播放器报 5411007），实测确认。
+      const ref: string = PlayUrlResolver.isSelfSigned(url) ? '' : sniffer.refererOf(url);
+      if (ref.length > 0) {
+        const hs: Record<string, string> = JSON.parse('{}') as Record<string, string>;
+        hs['Referer'] = ref;
+        try {
+          const src: media.MediaSource = media.createMediaSourceWithUrl(url, hs);
+          // 这版 SDK 的 setMediaSource 实际返回 undefined，不能直接 .catch
+          const pr: Object | undefined = p.setMediaSource(src) as Object | undefined;
+          if (pr !== undefined && pr !== null) {
+            (pr as Promise<void>).catch((e: BusinessError) => {
+              hilog.error(DOMAIN, TAG, 'setMediaSource failed: %{public}s / %{public}d',
+                e.message, e.code);
+            });
+          }
+        } catch (e) {
+          hilog.error(DOMAIN, TAG, 'createMediaSource threw: %{public}s', (e as Error).message);
+          p.url = url;
+        }
+      } else {
+        p.url = url;
+      }
       // 直播也跑计时器：curTime 用来分辨「起播预缓冲」和「真卡顿」，
       // 顺便让直播中途的缓冲提示也能出来
       this.startTimer();
@@ -1776,6 +1799,10 @@ struct Player {
           // 返回 false 会被它吃掉，事件冒泡不到根容器，OK 就等于没反应
           return this.handleKey(e);
         })
+
+      // 隐藏的无头 WebView：只在「原始地址是个播放页」时用——那种页面要靠自己的
+      // JS 去请求流地址，纯 HTTP 抓 HTML 是抓不到的。解析完会导航到 about:blank 停掉。
+      SniffWeb()
     }
     .width('100%')
     .height('100%')

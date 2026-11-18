@@ -30,8 +30,6 @@ const DISCLAIM: string[] = [
 @Component
 export struct About {
   @State ver: string = '';
-  // 不能叫 build：会和自定义组件的 build() 方法撞名
-  @State buildNo: string = '';
   @State model: string = '';
   @State osName: string = '';
   @State api: string = '';
@@ -42,7 +40,6 @@ export struct About {
     try {
       const bi = bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
       this.ver = bi.versionName;
-      this.buildNo = bi.versionCode.toString();
       this.pkg = bi.name;
     } catch (e) {
       this.ver = '';
@@ -114,7 +111,7 @@ export struct About {
           .fontSize(13.5)
           .fontColor(C_SUB)
         Row({ space: 8 }) {
-          Text(this.buildNo.length > 0 ? '构建 ' + this.buildNo : '构建 —')
+          Text(this.ver.length > 0 ? 'v' + this.ver : '')
             .fontSize(11.5)
             .fontColor('#FFB37A')
             .padding({ left: 10, right: 10, top: 4, bottom: 4 })
@@ -179,7 +176,7 @@ export struct About {
   envCard() {
     Column() {
       this.cardTitle('版本与环境')
-      this.infoRow('版本', this.ver.length > 0 ? 'v' + this.ver + ' · ' + this.buildNo : this.buildNo)
+      this.infoRow('版本', this.ver.length > 0 ? 'v' + this.ver : '')
       this.infoRow('包名', this.pkg.length > 0 ? this.pkg : 'com.moviebox.tv')
       this.infoRow('设备', this.model)
       this.infoRow('系统', this.osName)
@@ -202,7 +199,7 @@ export struct About {
     Column() {
       this.cardTitle('数据来源')
       this.credit('豆瓣公开接口', '评分、类型、片长、剧照')
-      this.credit('IPTV 公开列表', '直播源由你自己配置')
+      this.credit('IPTV 公开列表', '内置直播频道表（iptv-org 整理）')
       this.credit('第三方采集站', '片名、线路、播放地址')
       this.credit('HarmonyOS ArkUI', '界面与媒体播放能力')
       Text('以上内容版权均归各自权利人所有，本应用只做展示。')

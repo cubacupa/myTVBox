@@ -1,9 +1,9 @@
 {
   "app": {
-    "bundleName": "io.github.cubacupa.mytvbox",
-    "vendor": "cubacupa",
-    "versionCode": 1001000,
-    "versionName": "1.1.0",
+    "bundleName": "com.moviebox.tv",
+    "vendor": "moviebox",
+    "versionCode": 2001005,
+    "versionName": "2.1.5",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

@@ -10,6 +10,7 @@ import { RatingStore } from '../utils/RatingStore';
 import { PosterStore } from '../utils/PosterStore';
 import { BackdropStore } from '../utils/BackdropStore';
 import { HttpUtil } from '../utils/HttpUtil';
+import { ImageCache } from '../utils/ImageCache';
 import { DoubanAuth } from '../utils/DoubanAuth';
 import { PinStore } from '../utils/PinStore';
 import { SideNav } from '../components/SideNav';
@@ -31,10 +32,8 @@ import { SideNav } from '../components/SideNav';
  * 只有左侧和底部加重，右侧留出一大块干净的图，主推位才有一眼看到画面的气势。
  * 抓不到剧照时用内置的 hero_fallback 兜底，不会退回一块纯黑背景。
  *
- * 主推位不放海报：片名 / 元信息 / 简介 / 按钮整组放在一块圆角磨砂玻璃上
- * （backdropBlur 44 + 半透明暖黑 #3D0B0A0C + 1px 高光边）。玻璃让背景可以少压黑，
- * 文字又永远有底，比整屏加黑纱耐看。注意别换回 backgroundBlurStyle：
- * COMPONENT_THICK 在电视上会把材质底色和模糊结果糊成一整块死色，看着就是灰板子。
+ * 主推位不放海报：片名 / 元信息 / 简介 / 按钮直接压在整屏剧照上，不再套毛玻璃背板。
+ * 可读性靠底部遮罩自带的左侧/底部压黑；文字本身有描边级阴影兜底。
  *
  * 收藏 / 历史是本机全量记录，横向 List 直接铺完、可以一直滑到底，
  * 所以这两行不再放「查看全部」（原来截断 14 部时才需要那个入口）。
@@ -135,7 +134,11 @@ struct Home {
   private pin: string = '';
   @State heroIdx: number = 0;
   @State shelves: Shelf[] = [];
-  @State loading: boolean = true;
+  /** 加载中：骨架呼吸动画跟着它启停，别让定时器空转 */
+  @State @Watch('onLoadingChange') loading: boolean = true;
+  /** 骨架呼吸相位：0/1 来回切，驱动明暗，让"还在拉片单"第一屏就能看见 */
+  @State skelPhase: number = 0;
+  private skelTimer: number = -1;
   @State err: string = '';
   @State siteName: string = '';
   @State needConfig: boolean = false;
@@ -152,13 +155,54 @@ struct Home {
   @StorageProp('ratingTick') ratingTick: number = 0;
   @StorageProp('posterTick') posterTick: number = 0;
   @StorageProp('backdropTick') @Watch('onBackdropTick') backdropTick: number = 0;
+  /** 站点外链海报本地化完成的信号：读一下即可让卡片重绘出图 */
+  @State picTick: number = 0;
+  /** url -> 本地 file:// 路径（本进程内已落盘的站点海报） */
+  private siteLocal: Map<string, string> = new Map<string, string>();
+  /** 正在下载的 url，别重复发请求 */
+  private siteFetching: Set<string> = new Set<string>();
 
   private loadSeq: number = 0;
   /** 收藏 + 历史的指纹：返回首页时只有它变了才重新拉片单 */
   private rowSig: string = '';
 
   aboutToAppear(): void {
+    this.startSkeletonAnim();
     this.boot();
+  }
+
+  aboutToDisappear(): void {
+    this.stopSkeletonAnim();
+  }
+
+  /** 只在加载期让骨架明暗呼吸；数据一到就停，不空转定时器 */
+  private onLoadingChange(): void {
+    if (this.loading) {
+      this.startSkeletonAnim();
+    } else {
+      this.stopSkeletonAnim();
+    }
+  }
+
+  private startSkeletonAnim(): void {
+    if (this.skelTimer >= 0) {
+      return;
+    }
+    this.skelTimer = setInterval(() => {
+      this.skelPhase = 1 - this.skelPhase;
+    }, 520);
+  }
+
+  private stopSkeletonAnim(): void {
+    if (this.skelTimer >= 0) {
+      clearInterval(this.skelTimer);
+      this.skelTimer = -1;
+    }
+  }
+
+  /** 骨架明暗：亮 1 / 暗 0.28，反差拉到肉眼明显；过渡由各骨架条自己的 .animation() 完成 */
+  private skelOpacity(): number {
+    return this.skelPhase === 0 ? 1 : 0.28;
   }
 
   onPageShow(): void {
@@ -173,7 +217,6 @@ struct Home {
   private async boot(): Promise<void> {
     this.loading = true;
     const ctx = getContext(this) as common.Context;
-    // 开源版不做首启预置：PIN 与豆瓣登录态都由用户自己设置。
     this.pin = PinStore.get(ctx);
     HttpUtil.init(ctx);
     DoubanAuth.init(ctx);
@@ -306,16 +349,8 @@ struct Home {
     try {
       const rows: Shelf[] = [];
 
-      // ---- 1) 我的收藏 ----
-      const favs: VodMark[] = this.visibleMarks(MarkStore.listFav(ctx));
-      if (favs.length > 0) {
-        rows.push({
-          kind: K_FAV, title: '我的收藏',
-          marks: favs
-        });
-      }
-
-      // ---- 2) 继续观看（播放历史） ----
+      // ---- 1) 继续观看（播放历史）----
+      // 放在收藏上面：刚看过的片是「现在就要接着看」的，比静态收藏更该先看到
       const his: VodMark[] = this.visibleMarks(MarkStore.listHistory(ctx));
       if (his.length > 0) {
         rows.push({
@@ -324,10 +359,20 @@ struct Home {
         });
       }
 
+      // ---- 2) 我的收藏 ----
+      const favs: VodMark[] = this.visibleMarks(MarkStore.listFav(ctx));
+      if (favs.length > 0) {
+        rows.push({
+          kind: K_FAV, title: '我的收藏',
+          marks: favs
+        });
+      }
+
       // ---- 3) 随机推荐 ----
       // 首页只铺本机收藏 / 历史；分类列表仍要拉，随机推荐那 20 部就是从这些分类里抽的。
       this.shelves = rows;
       this.loading = false;
+      this.warmPics();
       try {
         const rawCls: VodClass[] = await SiteApi.getClasses(site);
         if (seq !== this.loadSeq) {
@@ -455,6 +500,7 @@ struct Home {
     this.heroes = h;
     this.heroIdx = 0;
     this.syncHero();
+    this.warmPics();
   }
 
   /**
@@ -496,6 +542,7 @@ struct Home {
       // 先落缓存再同步界面：同步里要读上下文，页面万一已经被销毁也不能影响这批被记住
       this.savePicks(site.key);
       this.syncHero();
+      this.warmPics();
       const warm: VodItem[] = [];
       for (const g of groups) {
         for (const it of g) {
@@ -782,6 +829,61 @@ struct Home {
     return p;
   }
 
+  /**
+   * 豆瓣图床直连回 418（Image 组件带不了 Referer），
+   * 这类地址必须先抓到本地再画 —— 详情页和 PosterCard 早就这么干了，
+   * 首页的随机推荐缩略图当初是直接画外链的，于是整排里凡是豆瓣图的就只剩黑框。
+   */
+  private isDoubanPic(u: string): boolean {
+    return u.indexOf('doubanio.com') >= 0;
+  }
+
+  /** 真正能画的地址：豆瓣图床只返回本地化结果，没下完返回空串（先显示占位，别留黑框） */
+  private picReady(u: string): string {
+    if (this.picTick < 0 || !this.isDoubanPic(u)) {
+      return u;
+    }
+    const hit: string | undefined = this.siteLocal.get(u);
+    return hit === undefined ? '' : hit;
+  }
+
+  /** 把一个外链海报丢进本地化通道：已在盘里直接取，下好之后 +1 让卡片重绘 */
+  private warmPic(u: string): void {
+    if (u.length === 0 || !this.isDoubanPic(u)) {
+      return;
+    }
+    if (this.siteLocal.has(u) || this.siteFetching.has(u) || ImageCache.hasFailed(u)) {
+      return;
+    }
+    const hit: string = ImageCache.cached(u);
+    if (hit.length > 0) {
+      this.siteLocal.set(u, hit);
+      return;
+    }
+    this.siteFetching.add(u);
+    ImageCache.local(u, '').then((p: string) => {
+      this.siteFetching.delete(u);
+      if (p.length > 0) {
+        this.siteLocal.set(u, p);
+        this.picTick++;
+      }
+    }).catch(() => {
+      this.siteFetching.delete(u);
+    });
+  }
+
+  /** 主推位、缩略图、收藏/记录行里的外链海报统一预热一遍 */
+  private warmPics(): void {
+    for (const h of this.heroes) {
+      this.warmPic(h.pic);
+    }
+    for (const s of this.shelves) {
+      for (const m of s.marks) {
+        this.warmPic(this.picOfMark(m));
+      }
+    }
+  }
+
   private scoreOf(item: VodItem): string {
     if (this.ratingTick < 0 || this.posterTick < 0) {
       return '';
@@ -837,15 +939,15 @@ struct Home {
     }
   }
 
-  private goDetail(siteKey: string, vodId: string): void {
+  private goDetail(siteKey: string, vodId: string, name: string, pic: string): void {
     router.pushUrl({
       url: 'pages/Detail',
-      params: { key: siteKey, vodId: vodId }
+      params: { key: siteKey, vodId: vodId, name: name, pic: pic }
     }).catch(() => {});
   }
 
   private goMark(m: VodMark): void {
-    this.goDetail(m.siteKey, m.vodId);
+    this.goDetail(m.siteKey, m.vodId, m.name, m.pic);
   }
 
   private toggleHeroFav(): void {
@@ -895,13 +997,9 @@ struct Home {
   }
 
   private errorText(): string {
-    if (this.err.length > 0) {
-      return this.err;
-    }
-    if (this.loading) {
-      return '正在加载片单…';
-    }
-    return '';
+    // 「正在加载」的提示已经放进主推骨架的转圈里（第一屏可见），这里只报错误，
+    // 免得加载期底部再重复一行同样的字。
+    return this.err;
   }
 
   // ---------------- 视图 ----------------
@@ -942,7 +1040,9 @@ struct Home {
       // 标签行
       Row({ space: 9 }) {
         Row().width(76).height(27).borderRadius(8).backgroundColor('#1AFFFFFF')
+          .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
         Row().width(58).height(27).borderRadius(8).backgroundColor('#12FFFFFF')
+          .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
       }
       .margin({ bottom: 14 })
 
@@ -952,21 +1052,30 @@ struct Home {
         .height(46)
         .borderRadius(10)
         .backgroundColor('#1FFFFFFF')
+        .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
         .margin({ bottom: 14 })
 
-      // 评分 + 元信息条
-      Row()
-        .width(300)
-        .height(24)
-        .borderRadius(8)
-        .backgroundColor('#14FFFFFF')
-        .margin({ top: 9, bottom: 14 })
+      // 加载指示：转圈 + 文案，第一屏正中就看得见「正在加载」
+      Row({ space: 10 }) {
+        LoadingProgress()
+          .width(22)
+          .height(22)
+          .color('#FF8A3D')
+        Text('正在加载片单…')
+          .fontSize(14)
+          .fontColor('#B9B9C4')
+      }
+      .height(24)
+      .margin({ top: 9, bottom: 14 })
 
       // 简介三条
       Column({ space: 10 }) {
         Row().width(656).height(12).borderRadius(6).backgroundColor('#0FFFFFFF')
+          .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
         Row().width(612).height(12).borderRadius(6).backgroundColor('#0FFFFFFF')
+          .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
         Row().width(548).height(12).borderRadius(6).backgroundColor('#0FFFFFFF')
+          .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
       }
       .width(660)
       .height(66)
@@ -981,13 +1090,8 @@ struct Home {
     }
     .alignItems(HorizontalAlign.Start)
     .width(724)
-    .padding({ left: 30, right: 34, top: 24, bottom: 26 })
-    .borderRadius(26)
-    .backdropBlur(44)
-    .backgroundColor('#3D0B0A0C')
-    .border({ width: 1, color: '#2EFFFFFF' })
-    .shadow({ radius: 40, color: '#4D000000', offsetX: 0, offsetY: 14 })
-    // 左沿和下面「随机推荐」/收藏行对齐到同一条 x=56 的基准线，别再往里缩 40
+    .padding({ left: 0, right: 34, top: 24, bottom: 26 })
+    // 跟 heroInfo 同步：玻璃背板已去掉，骨架也别再画毛玻璃板
     .margin({ bottom: 22 })
   }
 
@@ -1001,17 +1105,20 @@ struct Home {
         .borderRadius(13)
         .backgroundColor('#14151C')
         .border({ width: 1, color: '#12FFFFFF' })
+        .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
       Row()
         .width(94)
         .height(12)
         .borderRadius(6)
         .backgroundColor('#14FFFFFF')
+        .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
         .margin({ top: 9 })
       Row()
         .width(56)
         .height(10)
         .borderRadius(5)
         .backgroundColor('#0FFFFFFF')
+        .opacity(this.skelOpacity()).animation({ duration: 460, curve: Curve.EaseInOut })
         .margin({ top: 6 })
     }
     .width(132)
@@ -1020,8 +1127,8 @@ struct Home {
 
   @Builder
   heroInfo() {
-    // 文案放在一块磨砂玻璃上：图再好看，片名和简介底下没有底子就一定读不清。
-    // 有了这块玻璃，背景就可以少压黑一点 —— 比把整屏调成黑纱更耐看。
+    // 文案直接压在整屏剧照上（玻璃背板已去掉）。可读性靠两层：底图自带的左侧/底部
+    // 压黑遮罩 + 每段文字自己的黑色 textShadow。别再套回毛玻璃板。
     Column({ space: 0 }) {
       // 标签行：来源角标 + 豆瓣类型（悬疑 / 犯罪 / 剧情），没有豆瓣数据才退回采集站分类
       Row({ space: 9 }) {
@@ -1043,6 +1150,7 @@ struct Home {
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .constraintSize({ maxWidth: 660 })
+        .textShadow({ radius: 6, color: '#CC000000', offsetX: 0, offsetY: 2 })
 
       // 评分 + 元信息
       Row({ space: 10 }) {
@@ -1064,6 +1172,7 @@ struct Home {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .layoutWeight(1)
+          .textShadow({ radius: 4, color: '#99000000', offsetX: 0, offsetY: 1 })
       }
       .width(660)
       // 固定行高：有评分时那行会冒出 ★ 和 17 号数字，不锁高度会把这行撑高 2~3px，
@@ -1084,6 +1193,7 @@ struct Home {
             .maxLines(3)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width(660)
+            .textShadow({ radius: 4, color: '#B3000000', offsetX: 0, offsetY: 1 })
         }
       }
       .width(660)
@@ -1124,7 +1234,7 @@ struct Home {
         .onClick(() => {
           const h: HeroItem | null = this.hero();
           if (h !== null) {
-            this.goDetail(h.siteKey, h.vodId);
+            this.goDetail(h.siteKey, h.vodId, h.name, h.pic);
           }
         })
 
@@ -1153,18 +1263,9 @@ struct Home {
       }
     }
     .alignItems(HorizontalAlign.Start)
-    .padding({ left: 30, right: 34, top: 24, bottom: 26 })
-    .borderRadius(26)
-    // 毛玻璃要「看得见背后」才算玻璃：只对背景做模糊，底板颜色压到 19% 左右。
-    // 之前用 backgroundBlurStyle(COMPONENT_THICK) 会把材质底色和模糊结果一起糊成
-    // 一整块死色，远看就是一张灰板子。
-    // 模糊半径 44：56 会把背后糊成一块纯色，44 还能看出图的光影走向，更像玻璃
-    .backdropBlur(44)
-    .backgroundColor('#3D0B0A0C')
-    .border({ width: 1, color: '#2EFFFFFF' })
-    .shadow({ radius: 40, color: '#4D000000', offsetX: 0, offsetY: 14 })
-    // 面板底沿和下一行「随机推荐」之间必须留气口，原来只差 6，亮图上看着像粘住了
-    // 左沿和下面「随机推荐」/收藏行对齐到同一条 x=56 的基准线，别再往里缩 40
+    .padding({ left: 0, right: 34, top: 24, bottom: 26 })
+    // 玻璃背板已去掉：文字直接压在整屏剧照上，靠底图自带的左侧/底部压黑遮罩保证可读。
+    // 面板底沿和下一行「随机推荐」之间留气口；左沿归零，与随机推荐卡片同一起点。
     .margin({ bottom: 22 })
   }
 
@@ -1213,7 +1314,8 @@ struct Home {
     .height(32)
     .alignItems(VerticalAlign.Center)
     .padding({ right: 56 })
-    .margin({ bottom: 8 })
+    // 标题和下面那排缩略图之间留出呼吸：贴太近像同一块的两行
+    .margin({ bottom: 20 })
   }
 
   /** 随机推荐里的一张：点它 = 换上面的主推，不进详情 */
@@ -1226,12 +1328,23 @@ struct Home {
           .height(198)
           .borderRadius(13)
           .backgroundColor('#1A1B22')
-        if (it.pic.length > 0) {
-          Image(it.pic)
+        if (this.picReady(it.pic).length > 0) {
+          Image(this.picReady(it.pic))
             .width(132)
             .height(198)
             .objectFit(ImageFit.Cover)
             .borderRadius(13)
+        } else {
+          // 规则站片子常常没海报也没刮到图，别只留一个黑框，给个明确占位
+          Column() {
+            Text('暂无海报')
+              .fontSize(12)
+              .fontColor('#6E6E7A')
+          }
+          .width(132)
+          .height(198)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
         }
         Column()
           .width(132)
@@ -1310,7 +1423,7 @@ struct Home {
     .width('100%')
     .height(30)
     .padding({ right: 56 })
-    .margin({ bottom: 12 })
+    .margin({ bottom: 18 })
   }
 
   /** 收藏 / 历史卡片：竖版海报 + 片名 + 一行状态 */
@@ -1323,8 +1436,8 @@ struct Home {
           .height(226)
           .borderRadius(13)
           .backgroundColor('#1A1B22')
-        if (this.picOfMark(m).length > 0) {
-          Image(this.picOfMark(m))
+        if (this.picReady(this.picOfMark(m)).length > 0) {
+          Image(this.picReady(this.picOfMark(m)))
             .width(150)
             .height(226)
             .objectFit(ImageFit.Cover)
@@ -1439,7 +1552,7 @@ struct Home {
         .alignItems(HorizontalAlign.Start)
         .margin({ top: 10 })
 
-        // ---- 片单：收藏 → 继续观看（空的整行不画） ----
+        // ---- 片单：继续观看 → 收藏（空的整行不画） ----
         ForEach(this.shelves, (s: Shelf, ri: number) => {
           Column() {
             this.sectionTitle(s)
@@ -1534,26 +1647,46 @@ struct Home {
       .height('100%')
       .zIndex(2)
 
-      // ---- 搜索：右上角一颗浮动圆钮，不占一整行，主推位才能顶到屏幕最上面 ----
-      // 底下现在是整屏剧照，按钮要自带暗底，否则在亮画面上会看不见
-      Row() {
-        SymbolGlyph($r('sys.symbol.magnifyingglass'))
-          .fontSize(19)
-          .fontColor([this.hot('search') ? '#FFD9BC' : '#E8E8EF'])
-          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      // ---- 右上角：当前源名 + 搜索圆钮 ----
+      // 底下现在是整屏剧照，两者都自带暗底，否则在亮画面上会看不见。
+      // 用同一个 Row 承载、右对齐到原搜索按钮的位置（右边缘 x=1224），
+      // 源名在左、搜索在右，不用再单独给标签算锚点。
+      Row({ space: 10 }) {
+        // 当前点播源名字：一眼看清在刷哪个站，不用点进设置
+        if (this.siteName.length > 0) {
+          Text(this.siteName)
+            .fontSize(13)
+            .fontColor(this.hot('search') ? '#FFD9BC' : '#E8E8EF')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: 200 })
+            .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+            .borderRadius(20)
+            .backgroundColor(this.hot('search') ? '#A61C1620' : '#80000000')
+            .border({ width: 1, color: this.hot('search') ? '#FFD9BC' : '#4DFFFFFF' })
+        }
+        Row() {
+          SymbolGlyph($r('sys.symbol.magnifyingglass'))
+            .fontSize(19)
+            .fontColor([this.hot('search') ? '#FFD9BC' : '#E8E8EF'])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+        }
+        .width(44)
+        .height(44)
+        .borderRadius(22)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor(this.hot('search') ? '#A61C1620' : '#80000000')
+        .border({ width: 1, color: this.hot('search') ? '#FFD9BC' : '#4DFFFFFF' })
+        .focusable(true)
+        .onFocus(() => { this.focusId = 'search'; })
+        .onBlur(() => { this.clearHot('search'); })
+        .onHover((isHover: boolean) => { this.hoverId = isHover ? 'search' : ''; })
+        .onClick(() => { router.pushUrl({ url: 'pages/Search' }).catch(() => {}); })
       }
-      .position({ x: 1180, y: 22 })
-      .width(44)
+      // 右边缘锚在原搜索按钮的右沿 x=1224：源名往左长，搜索按钮位置不动
+      .position({ x: 1224, y: 22 })
+      .markAnchor({ x: '100%', y: 0 })
       .height(44)
-      .borderRadius(22)
-      .justifyContent(FlexAlign.Center)
-      .backgroundColor(this.hot('search') ? '#A61C1620' : '#80000000')
-      .border({ width: 1, color: this.hot('search') ? '#FFD9BC' : '#4DFFFFFF' })
-      .focusable(true)
-      .onFocus(() => { this.focusId = 'search'; })
-      .onBlur(() => { this.clearHot('search'); })
-      .onHover((isHover: boolean) => { this.hoverId = isHover ? 'search' : ''; })
-      .onClick(() => { router.pushUrl({ url: 'pages/Search' }).catch(() => {}); })
       .zIndex(3)
 
       // ---- 未配置源时的引导 ----

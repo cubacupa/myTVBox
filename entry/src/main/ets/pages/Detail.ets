@@ -1,6 +1,7 @@
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { AppState } from '../utils/AppState';
+import { SniffWeb } from '../components/SniffWeb';
 import { SiteApi } from '../utils/SiteApi';
 import { MarkStore, VodMark } from '../utils/MarkStore';
 import { PlayUrlResolver } from '../utils/PlayUrlResolver';
@@ -8,6 +9,7 @@ import { PlayLine } from '../model/TvBoxModels';
 import { VodDetail, VodEpisode, VodItem } from '../model/VodItem';
 import { RatingStore } from '../utils/RatingStore';
 import { PosterStore } from '../utils/PosterStore';
+import { ImageCache } from '../utils/ImageCache';
 import { PlayProgress } from '../utils/PlayProgress';
 
 interface DetailParams {
@@ -15,6 +17,9 @@ interface DetailParams {
   /** 首页传的是 siteKey，两个都认，免得换页面进来站点丢了 */
   siteKey?: string;
   vodId: string;
+  /** 列表页顺手把片名/海报带过来：网页规则站的详情页本身没有这两样，等它返回就是空的 */
+  name?: string;
+  pic?: string;
 }
 
 /**
@@ -41,6 +46,8 @@ struct Detail {
   @State fav: boolean = false;
   /** 刮削到的本地海报；空则用站点图 */
   @State poster: string = '';
+  /** 站点图落到本地后的路径：豆瓣图直连 403，只能先下载再画 */
+  @State picLocal: string = '';
   /** 看过的集名（跨线路按集名合并）：按钮压暗 */
   @State watchedEps: string[] = [];
   /** 最近起播的那一集：橙字 + 橙框，也就是「上次看到」 */
@@ -87,6 +94,14 @@ struct Detail {
     this.siteKey = p.key !== undefined && p.key.length > 0 ? p.key
       : (p.siteKey === undefined ? '' : p.siteKey);
     this.vodId = p.vodId ?? '';
+    // 列表页带过来的片名/海报先顶上，详情接口回来再覆盖（网页规则站的详情页给不出这两样）
+    if (p.name !== undefined && p.name.length > 0) {
+      this.name = p.name;
+    }
+    if (p.pic !== undefined && p.pic.length > 0) {
+      this.pic = p.pic;
+      this.ensurePic();
+    }
     this.refreshWatched();
     this.load();
   }
@@ -230,8 +245,16 @@ struct Detail {
         this.loading = false;
         return;
       }
-      this.name = d.vod_name ?? '';
-      this.pic = d.vod_pic ?? '';
+      // 网页模式（XPath）规则只给选集链接、没有影片元信息，别把列表带过来的片名清掉
+      const dn: string = d.vod_name ?? '';
+      if (dn.length > 0) {
+        this.name = dn;
+      }
+      const dp: string = d.vod_pic ?? '';
+      if (dp.length > 0) {
+        this.pic = dp;
+      }
+      this.ensurePic();
       const did: string | number | undefined = d.vod_douban_id;
       if (typeof did === 'number') {
         this.doubanId = did > 0 ? Math.floor(did).toString() : '';
@@ -323,6 +346,16 @@ struct Detail {
       return [];
     }
     return this.lines[this.lineIdx].episodes;
+  }
+
+  /** 选集网格高度：10 集一行、格高 60、行距 12，最多两行（超出两行的靠 Grid 内部滚动） */
+  private epsGridH(): number {
+    const n: number = this.eps().length;
+    if (n === 0) {
+      return 0;
+    }
+    const rows: number = Math.min(2, Math.ceil(n / 10));
+    return rows * 60 + (rows - 1) * 12;
   }
 
   private play(ep: VodEpisode): void {
@@ -428,7 +461,31 @@ struct Detail {
 
   /** 详情页可用的海报：优先豆瓣刮削图（本地），否则站点图 */
   private heroPicUrl(): string {
-    return this.poster.length > 0 ? this.poster : this.pic;
+    if (this.poster.length > 0) {
+      return this.poster;
+    }
+    return this.picLocal.length > 0 ? this.picLocal : this.pic;
+  }
+
+  /**
+   * 站点海报外链在电视上会被图床挡（豆瓣 403），先下载到本地再画。
+   * 已经落过盘的同步就能用：进程重启后 done 表是空的，但文件还在。
+   */
+  private ensurePic(): void {
+    const u: string = (this.pic ?? '').trim();
+    if (u.length === 0 || u.startsWith('file://') || u.startsWith('data:')) {
+      return;
+    }
+    const hit: string = ImageCache.cached(u);
+    if (hit.length > 0) {
+      this.picLocal = hit;
+      return;
+    }
+    ImageCache.local(u, '').then((p: string) => {
+      if (p.length > 0) {
+        this.picLocal = p;
+      }
+    }).catch(() => {});
   }
 
   private playLabel(): string {
@@ -558,8 +615,9 @@ struct Detail {
         .justifyContent(FlexAlign.Center)
       } else {
         Column() {
-          // ---- 顶栏：只留返回。片名下面 58 号大字已经有一份，这里再写一遍是废信息 ----
-          Row({ space: 18 }) {
+          // ---- 顶部一行：只放返回。不再为它单开一列——那一列会把内容左边界
+          // 顶到 200 多，跟首页 / 点播页的边距完全对不上 ----
+          Row() {
             Row({ space: 8 }) {
               SymbolGlyph($r('sys.symbol.chevron_left'))
                 .fontSize(17)
@@ -569,21 +627,19 @@ struct Detail {
                 .fontSize(15)
                 .fontColor('#EDEDF2')
             }
-            .height(48)
-            .padding({ left: 22, right: 26 })
-            .borderRadius(24)
+            .height(44)
+            .padding({ left: 16, right: 20 })
+            .borderRadius(22)
             .backgroundColor('#16FFFFFF')
             .border({ width: 1, color: this.focusId === 'back' ? '#FFD9BC' : '#24FFFFFF' })
             .focusable(true)
             .onFocus(() => { this.focusId = 'back'; })
             .onBlur(() => { this.focusId = ''; })
             .onClick(() => { router.back(); })
-
             Blank()
           }
           .width('100%')
-          .height(48)
-          .margin({ top: 28 })
+          .margin({ bottom: 18 })
 
           // ---- 主体：海报 + 信息 ----
           Row() {
@@ -600,6 +656,10 @@ struct Detail {
                   .height(392)
                   .objectFit(ImageFit.Cover)
                   .borderRadius(20)
+                  .onError(() => {
+                    // 外链被挡时再走一次本地通道（已经成功过的不会再发请求）
+                    this.ensurePic();
+                  })
               }
               Column()
                 .width(268)
@@ -629,7 +689,7 @@ struct Detail {
 
               // 片名
               Text(this.name)
-                .fontSize(50)
+                .fontSize(42)
                 .fontWeight(FontWeight.Bold)
                 .fontColor('#FFFFFF')
                 .maxLines(2)
@@ -660,16 +720,16 @@ struct Detail {
               .width('100%')
               .margin({ top: 12, bottom: 18 })
 
-              // 简介
+              // 简介：返回按钮从顶栏挪到左列后多出一行的纵向空间，这里从 3 行放到 5 行
               Text(this.content.length > 0 ? this.content : '暂无简介')
                 .fontSize(15)
                 .lineHeight(24)
                 .fontColor('#9C9CA8')
-                .maxLines(3)
+                .maxLines(5)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
                 .width('100%')
 
-              // 按钮 + 线路
+              // 播放 / 收藏
               Row({ space: 14 }) {
                 // 播放 / 继续观看
                 Row({ space: 10 }) {
@@ -723,50 +783,59 @@ struct Detail {
                 .onFocus(() => { this.focusId = 'fav'; })
                 .onBlur(() => { this.focusId = ''; })
                 .onClick(() => { this.toggleFav(); })
-
-                // 线路切换
-                if (this.lines.length > 1) {
-                  Row({ space: 8 }) {
-                    Text('线路')
-                      .fontSize(13)
-                      .fontColor('#7E7E8A')
-                      .margin({ right: 4 })
-                    ForEach(this.lines, (l: PlayLine, i: number) => {
-                      Row() {
-                        Text(l.name)
-                          .fontSize(13)
-                          .fontWeight(i === this.lineIdx ? FontWeight.Medium : FontWeight.Normal)
-                          .fontColor(i === this.lineIdx ? '#FFB37A' : '#B0B0BC')
-                          .maxLines(1)
-                      }
-                      .height(38)
-                      .padding({ left: 15, right: 15 })
-                      .borderRadius(10)
-                      .backgroundColor(i === this.lineIdx ? '#22FF8A3D' : '#10FFFFFF')
-                      .border({
-                        width: 1,
-                        color: this.focusId === ('ln-' + i) ? '#FFD9BC'
-                          : (i === this.lineIdx ? '#8CFF8A3D' : '#1AFFFFFF')
-                      })
-                      .focusable(true)
-                      .onFocus(() => { this.focusId = 'ln-' + i; })
-                      .onBlur(() => { this.focusId = ''; })
-                      .onClick(() => { this.lineIdx = i; })
-                    }, (l: PlayLine, i: number) => l.name + String(i))
-                  }
-                }
               }
               .margin({ top: 20 })
+
+              // 线路切换：单独一行、独立按钮，比播放/收藏小一号，别跟它们挤在一起误点
+              if (this.lines.length > 1) {
+                Row({ space: 12 }) {
+                  Text('线路')
+                    .fontSize(14)
+                    .fontColor('#7E7E8A')
+                    .margin({ right: 4 })
+                  ForEach(this.lines, (l: PlayLine, i: number) => {
+                    Row({ space: 6 }) {
+                      if (i === this.lineIdx) {
+                        // 选中标记，避免只靠颜色深浅区分（电视上不明显）
+                        SymbolGlyph($r('sys.symbol.checkmark_circle_fill'))
+                          .fontSize(13)
+                          .fontColor(['#150A04'])
+                          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+                      }
+                      Text(l.name)
+                        .fontSize(14)
+                        .fontWeight(i === this.lineIdx ? FontWeight.Medium : FontWeight.Normal)
+                        .fontColor(i === this.lineIdx ? '#150A04' : '#EDEDF2')
+                        .maxLines(1)
+                    }
+                    .height(42)
+                    .padding({ left: 16, right: 16 })
+                    .borderRadius(12)
+                    .backgroundColor(i === this.lineIdx ? '#FF8A3D' : '#16FFFFFF')
+                    .border({ width: 1, color: i === this.lineIdx ? '#FF8A3D' : '#2EFFFFFF' })
+                    .focusable(true)
+                    .scale({
+                      x: this.focusId === ('ln-' + i) ? 1.05 : 1,
+                      y: this.focusId === ('ln-' + i) ? 1.05 : 1
+                    })
+                    .animation({ duration: 140 })
+                    .onFocus(() => { this.focusId = 'ln-' + i; })
+                    .onBlur(() => { this.focusId = ''; })
+                    .onClick(() => { this.lineIdx = i; })
+                  }, (l: PlayLine, i: number) => l.name + String(i))
+                }
+                .margin({ top: 14 })
+              }
             }
             .alignItems(HorizontalAlign.Start)
             .layoutWeight(1)
-            .margin({ left: 48 })
+            .margin({ left: 40 })
           }
           .width('100%')
           .alignItems(VerticalAlign.Top)
-          .margin({ top: 16 })
+          .margin({ top: 8 })
 
-          // ---- 选集 ----
+          // ---- 选集：跟在上方信息之后自然排，不贴底 ----
           Column() {
             Row() {
               Text('选集')
@@ -794,27 +863,34 @@ struct Detail {
                   GridItem() {
                     this.epCell(ep, idx)
                   }
-                }, (ep: VodEpisode, idx: number) => ep.name + String(idx)
+                  // key 必须带上线路号：两条线路的集名完全一样（第01集…），
+                  // 只用集名做 key 会复用节点，切线路后点开还是上一条线路的地址
+                }, (ep: VodEpisode, idx: number) => String(this.lineIdx) + '-' + ep.name + String(idx)
                   + (this.lastEp === ep.name ? 'L' : (this.watchedEps.indexOf(ep.name) >= 0 ? 'W' : '')))
               }
               .columnsTemplate('1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr')
               .columnsGap(12)
               .rowsGap(12)
-              // 148 = 两行 60 + 行距 12 × 2 + 一点余量：整块落在 720 内，不再被屏幕底边切
-              .height(148)
+              // 按实际行数给高度：满 10 集一行，最多两行（格 60 + 行距 12）。
+              // 原来固定 148，6 集的片子只有一行，下面白白空出 88。
+              .height(this.epsGridH())
               .width('100%')
               .scrollBar(BarState.Off)
             }
           }
           .width('100%')
           .alignItems(HorizontalAlign.Start)
-          .margin({ top: 22 })
+          .margin({ top: 26 })
         }
         .width('100%')
         .height('100%')
-        .padding({ left: 88, right: 88 })
+        // 边距跟首页 / 点播页统一：左 56、上 28，不再为返回按钮单独让出一条 200 宽的竖列
+        .padding({ left: 56, right: 56, top: 28, bottom: 32 })
         .alignItems(HorizontalAlign.Start)
       }
+
+      // 网页模式（XPath）规则取剧集要在真页面里跑，这里挂一个隐藏 WebView
+      SniffWeb()
     }
     .width('100%')
     .height('100%')

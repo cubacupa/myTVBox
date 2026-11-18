@@ -780,11 +780,11 @@ export class HttpUtil {
   }
 
   /**
-   * 有些采集站的 vod_id 是 18 位大整数，JSON.parse 按 IEEE754
+   * 有些采集站的 vod_id 是 18 位大整数（巨量资源就是），JSON.parse 按 IEEE754
    * 解析会丢精度：629109902295433220 → 629109902295433216，
    * 再拿它去 ac=detail&ids= 查详情必然返回空（界面显示「没有取到影片详情」）。
    * 解析前给这种超大 ID 字面量加引号，当字符串保住原值。
-   * 只匹配 16 位以上的整数字面量：短 ID 站点、total / page 等数字都不受影响，
+   * 只匹配 16 位以上的整数字面量：暴风等站点的短 ID、total / page 等数字都不受影响，
    * 本来就是字符串的 ID 也不会被改动。
    */
   private static guardBigIds(s: string): string {
@@ -793,6 +793,16 @@ export class HttpUtil {
 
   static async getJson<T>(url: string): Promise<T> {
     const text: string = await HttpUtil.getText(url);
+    return HttpUtil.parseJsonBody<T>(text, url);
+  }
+
+  /** 同 getJson，但自带 Referer / UA（站点按 UA 分流时必须用这个） */
+  static async getJsonWith<T>(url: string, referer: string, ua: string): Promise<T> {
+    const text: string = await HttpUtil.getTextWith(url, referer, ua);
+    return HttpUtil.parseJsonBody<T>(text, url);
+  }
+
+  private static parseJsonBody<T>(text: string, url: string): T {
     const t: string = text.trim();
     if (t.length === 0) {
       throw new Error('返回内容为空 · ' + HttpUtil.clean(url));
