@@ -301,8 +301,14 @@ export function ruleToSite(text: string): RuleSiteResult {
     }
   }
   if (web) {
-    const canSearch: boolean = r.searchURL.length > 0 && r.searchList.length > 0 && r.searchResult.length > 0;
-    if (!canSearch) {
+    // 搜索和选集是两回事：有的规则搜索用 searchApiConfig 走 API，
+    // 选集才用 chapterRoads/chapterResult 走网页。这类混合规则没有网页搜索 XPath，
+    // 但 search() 会优先走 API 搜索，完全能搜——只要有任一搜索通道就放行。
+    const apiSearch: boolean = r.searchApi !== null
+      && r.searchListPath.length > 0 && r.searchSourcePath.length > 0;
+    const xpathSearch: boolean = r.searchURL.length > 0
+      && r.searchList.length > 0 && r.searchResult.length > 0;
+    if (!apiSearch && !xpathSearch) {
       return { site: null, msg: '规则缺少搜索 XPath（searchURL / searchList / searchResult）' };
     }
   }

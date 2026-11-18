@@ -73,7 +73,10 @@ export class SiteApi {
     if (!SiteApi.isKazumi(site)) {
       return false;
     }
-    return KazumiRuleApi.isXPathRule(SiteApi.ruleOf(site));
+    const r = SiteApi.ruleOf(site);
+    // 「慢」是慢在搜索要跑 WebView。混合规则（API 搜索 + XPath 选集）
+    // 搜索走的是普通 HTTP 接口，聚合时不该跳过。
+    return r !== null && r.searchApi === null && KazumiRuleApi.isXPathRule(r);
   }
 
   static async getClasses(site: SiteCfg): Promise<VodClass[]> {
