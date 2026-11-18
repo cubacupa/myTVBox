@@ -936,7 +936,7 @@ struct Settings {
                 Row() {
                   TextInput({
                     text: this.ruleText,
-                    placeholder: '规则名或规则链接，如 giriGiriLove'
+                    placeholder: 'Kazumi 规则名或链接，如 giriGiriLove'
                   })
                     .layoutWeight(1)
                     .height(46)
