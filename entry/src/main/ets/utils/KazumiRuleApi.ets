@@ -1133,7 +1133,12 @@ export class KazumiRuleApi {
   static async browseCategory(r: KazumiRule, cat: RuleCategory, page: number): Promise<KazumiListResult> {
     // MacCMS 第一页没有页码段（`1-----------.html`），模板统一写成 path + '@page---'，
     // 所以第 1 页要把 @page 换成空串才得到真实地址，换成 '1' 成了 `1--------1---`。
-    const url: string = cat.url.split('@page').join(page <= 1 ? '' : String(page));
+    // 另一种站（如 /type/xxx_2.html）页码前带下划线，模板写 `_@page`：
+    // 第 1 页要连前导下划线一起去掉，否则会得到 /type/xxx_.html。
+    let url: string = cat.url.split('@page').join(page <= 1 ? '' : String(page));
+    if (page <= 1) {
+      url = url.replace(/_(\.html|\.shtml|\.html\?|$)/, '$1');
+    }
     const rows = await sniffer.xpathRows(url, cat.list, cat.nameX, cat.href, 16000, cat.pic);
     const items: VodItem[] = [];
     for (const row of rows) {
