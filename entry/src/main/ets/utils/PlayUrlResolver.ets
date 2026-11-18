@@ -64,10 +64,36 @@ export class PlayUrlResolver {
   }
 
   /**
+   * 补回被上游写丢的 `?`。
+   *
+   * 实测某站点播放页给的 m3u8 地址把参数前的问号写成了 &，
+   * 直接请求 404（播放器报 5411007 IO not found）；
+   * 把紧跟媒体扩展名的第一个 & 换回 ? 就是 200 且是正常 HLS 清单。
+   * 这是站点后台录入的错，本地只能兜。
+   */
+  static normalizeMediaUrl(u: string): string {
+    const s: string = (u ?? '').trim();
+    if (s.length === 0 || s.indexOf('?') >= 0) {
+      return s;
+    }
+    const m: RegExpMatchArray | null = s.match(/\.(m3u8|mp4|flv|ts|mpd|mkv|mov|mp3)&/i);
+    if (m === null || m.index === undefined) {
+      return s;
+    }
+    const at: number = m.index + m[0].length - 1;
+    return s.substring(0, at) + '?' + s.substring(at + 1);
+  }
+
+  /**
    * 依次尝试：直链 → 解析接口 → 网页嗅探 → 猜 index.m3u8 → 原样返回。
    * 返回值保证是 http(s) 地址，避免把非法串交给播放器。
    */
   static async resolve(videoUrl: string, jx: string): Promise<string> {
+    const got: string = await PlayUrlResolver.resolveRaw(videoUrl, jx);
+    return PlayUrlResolver.normalizeMediaUrl(got);
+  }
+
+  private static async resolveRaw(videoUrl: string, jx: string): Promise<string> {
     const raw: string = (videoUrl ?? '').trim();
     if (raw.length === 0) {
       return '';

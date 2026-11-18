@@ -27,6 +27,9 @@ const REFERER: string = 'https://www.douban.com/';
 const TAG: string = 'ImageCache';
 const DOMAIN: number = 0x0001;
 
+/** 外链海报落地后 +1；所有列表页读一下这个 StorageProp 就会重绘出图 */
+const TICK_KEY: string = 'sitePicTick';
+
 export class ImageCache {
   private static dir: string = '';
   private static inited: boolean = false;
@@ -42,6 +45,7 @@ export class ImageCache {
       return;
     }
     ImageCache.inited = true;
+    AppStorage.setOrCreate<number>(TICK_KEY, 0);
     ImageCache.dir = ctx.cacheDir + '/' + DIR;
     try {
       fs.mkdirSync(ImageCache.dir);
@@ -62,6 +66,53 @@ export class ImageCache {
 
   static hasFailed(url: string): boolean {
     return ImageCache.failed.has(url);
+  }
+
+  /**
+   * 列表页画图前统一问这一句：拿到真正能画出来的地址。
+   *   - 本地图（刮削图 / file://）：原样
+   *   - 已本地化的外链：本地路径
+   *   - 本地化失败：退回原始外链，让 Image 自己试直连（最差等于没有这套机制）
+   *   - 正在下载 / 还没开始：空串，页面先显示占位，别留黑框
+   * 首页 / 记录 / 收藏都走这里，保证同一部片在各页表现一致。
+   */
+  static display(url: string): string {
+    if (url.length === 0) {
+      return '';
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      return url;
+    }
+    const hit: string = ImageCache.cached(url);
+    if (hit.length > 0) {
+      return hit;
+    }
+    if (ImageCache.hasFailed(url)) {
+      return url;
+    }
+    return '';
+  }
+
+  /**
+   * 把外链海报丢进本地化通道，下载完成后 +1 让所有列表页重绘。
+   * 同一个 url 只发一次请求（inflight / done / failed 去重）。
+   */
+  static warm(url: string): void {
+    if (url.length === 0 || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+      return;
+    }
+    if (ImageCache.cached(url).length > 0 || ImageCache.hasFailed(url)) {
+      return;
+    }
+    if (ImageCache.inflight.has(url)) {
+      return;
+    }
+    ImageCache.local(url, '').then(() => {
+      const n: number = AppStorage.get<number>(TICK_KEY) ?? 0;
+      AppStorage.setOrCreate<number>(TICK_KEY, n + 1);
+    }).catch(() => {
+      // 失败也会在 local 里记进 failed，这里不用重绘（display 会退回原链）
+    });
   }
 
   /**

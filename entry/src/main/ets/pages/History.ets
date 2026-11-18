@@ -1,8 +1,9 @@
 import { router } from '@kit.ArkUI';
+import { RatingStore } from '../utils/RatingStore';
 import { common } from '@kit.AbilityKit';
 import { MarkStore, VodMark } from '../utils/MarkStore';
 import { PosterStore } from '../utils/PosterStore';
-import { RatingStore } from '../utils/RatingStore';
+import { ImageCache } from '../utils/ImageCache';
 import { VodItem } from '../model/VodItem';
 import { PinStore } from '../utils/PinStore';
 import { SideNav } from '../components/SideNav';
@@ -34,6 +35,8 @@ struct History {
   @State siteName: string = '';
   @StorageProp('ratingTick') ratingTick: number = 0;
   @StorageProp('posterTick') posterTick: number = 0;
+  /** 外链海报本地化完成信号：读一下即触发卡片重绘 */
+  @StorageProp('sitePicTick') sitePicTick: number = 0;
 
   aboutToAppear(): void {
     this.refresh();
@@ -59,6 +62,7 @@ struct History {
     if (this.pin.length === 0 || this.histUnlocked) {
       this.items = all;
       this.hiddenCount = 0;
+      this.warmPics(all);
       return;
     }
     const vis: VodMark[] = [];
@@ -72,6 +76,26 @@ struct History {
     }
     this.items = vis;
     this.hiddenCount = n;
+    this.warmPics(vis);
+  }
+
+  /**
+   * 列表页补图。历史里只存了站点的 vod_pic，很多老图床域名早就失效了，
+   * 直连和本地化都拿不到 —— 详情页能出图靠的是按片名从豆瓣刮削，这里照做一遍。
+   * 只补「本地还没有图」的片：RatingStore / PosterStore 内部都有去重和失败上限。
+   */
+  private warmPics(marks: VodMark[]): void {
+    const items: VodItem[] = [];
+    for (const m of marks) {
+      ImageCache.warm(m.pic);
+      const probe: VodItem = { vod_id: m.vodId, vod_name: m.name, vod_pic: m.pic };
+      if (PosterStore.localOf(probe).length === 0) {
+        items.push(probe);
+      }
+    }
+    if (items.length > 0) {
+      RatingStore.warm(items);
+    }
   }
 
   private showLockBtn(): boolean {
@@ -120,7 +144,11 @@ struct History {
     if (p.length > 0 && !p.startsWith('http') && !p.startsWith('file')) {
       return '';
     }
-    return p;
+    // 读一下信号触发重绘；外链统一走本地化通道（豆瓣/QQ 图床直连在电视上画不出来）
+    if (this.sitePicTick < 0) {
+      return p;
+    }
+    return ImageCache.display(p);
   }
 
   private scoreOf(m: VodMark): string {

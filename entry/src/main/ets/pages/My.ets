@@ -2,6 +2,7 @@ import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { MarkStore, VodMark } from '../utils/MarkStore';
 import { PosterStore } from '../utils/PosterStore';
+import { ImageCache } from '../utils/ImageCache';
 import { RatingStore } from '../utils/RatingStore';
 import { VodItem } from '../model/VodItem';
 import { SideNav } from '../components/SideNav';
@@ -30,6 +31,8 @@ struct My {
   @State siteName: string = '';
   @StorageProp('ratingTick') ratingTick: number = 0;
   @StorageProp('posterTick') posterTick: number = 0;
+  /** 外链海报本地化完成信号：读一下即触发卡片重绘 */
+  @StorageProp('sitePicTick') sitePicTick: number = 0;
 
   aboutToAppear(): void {
     this.refresh();
@@ -56,6 +59,9 @@ struct My {
     }
     this.hiddenN = all.length - out.length;
     this.favs = out;
+    for (const m of out) {
+      ImageCache.warm(m.pic);
+    }
   }
 
   private hot(id: string): boolean {
@@ -81,7 +87,11 @@ struct My {
     if (p.length > 0 && !p.startsWith('http') && !p.startsWith('file')) {
       return '';
     }
-    return p;
+    // 读一下信号触发重绘；外链统一走本地化通道
+    if (this.sitePicTick < 0) {
+      return p;
+    }
+    return ImageCache.display(p);
   }
 
   private scoreOf(m: VodMark): string {

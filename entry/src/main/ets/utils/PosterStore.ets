@@ -147,13 +147,25 @@ interface SearchResp {
   subjects?: SearchBox;
 }
 
-/** 内部统一的候选结构（把搜索结果收敛成"能匹配的几个字段"） */
 interface SuggestTarget {
   id?: string;
   title?: string;
   year?: string;
   cover_url?: string;
   ratingValue?: number;
+}
+
+/**
+ * movie.douban.com/j/subject_suggest 的返回项。
+ * 只有标题/年份/id/图，没有评分——但它在 rexxar 搜索被 403 时**依然 200**
+ * （实测同一秒：rexxar 403、suggest 200 且能出正确条目），是搜索的救命通道。
+ */
+interface SuggestRow {
+  id?: string;
+  title?: string;
+  year?: string;
+  img?: string;
+  sub_title?: string;
 }
 
 /** movie.douban.com/j/subject_abstract 的返回，rate 是字符串（未开分是空串） */
@@ -319,7 +331,7 @@ export class PosterStore {
     s = s.replace(
       /(国语|粤语|英语|日语|韩语|中字|中文字幕|双语|无删减|未删减|导演剪辑版|高清|超清|蓝光|完整版|抢先版|HD|BD|DVD|TS|TC|4K|1080P|2160P|720P|HDR|杜比视界|更新至第?\d+集?|全\d+集|共\d+集|完结)/gi,
       ' ');
-    s = s.replace(/[·:：\-—_/|,，.。!！?？'"“”‘’]/g, ' ');
+    s = s.replace(/[·:：\-—_/|,，.。!！?？'"“”‘’、&＆・]/g, ' ');
     s = s.replace(/\s+/g, ' ').trim();
     return s;
   }
@@ -746,7 +758,7 @@ export class PosterStore {
           // 换写法重试也要留空隙：连着三次请求比"一条一条慢慢来"更容易触发风控
           await PosterStore.sleep(PosterStore.gapMs);
         }
-        cands = await PosterStore.query(tries[i]);
+        cands = await PosterStore.lookup(tries[i]);
         if (cands.length > 0) {
           break;
         }
@@ -770,7 +782,7 @@ export class PosterStore {
         const w2: string = PosterStore.withYear(raw, year);
         if (w2.length > 0 && tries.indexOf(w2) < 0) {
           await PosterStore.sleep(PosterStore.gapMs);
-          const c2: SuggestTarget[] = await PosterStore.query(w2);
+          const c2: SuggestTarget[] = await PosterStore.lookup(w2);
           if (c2.length > 0) {
             const h2: SuggestTarget | null = PosterStore.pick(c2, w2, year);
             if (PosterStore.yearOk(h2, year)) {
@@ -926,6 +938,64 @@ export class PosterStore {
     return out;
   }
 
+  /**
+   * 按片名找候选：先 rexxar 搜索（一次拿全 id/年份/分/图），
+   * 被 403/429 挡了再走 subject_suggest。
+   *
+   * 为什么要这条兜底（2026-11-18 实测）：
+   *   rexxar 搜索的配额极低（同一 IP 十来个请求就 403，几分钟才恢复），
+   *   而 subject_suggest 是**另一套配额**——rexxar 已 403 时它照样 200，
+   *   而且给的就是我们要的四件套（标题/年份/豆瓣 id/海报地址）。
+   *   以前 403 直接判「被限流」冻 30 分钟，整队片子的海报和分就一起没了，
+   *   表现就是「记录里两部片子永远没海报」。
+   */
+  private static async lookup(q: string): Promise<SuggestTarget[]> {
+    try {
+      const a: SuggestTarget[] = await PosterStore.query(q);
+      if (a.length > 0) {
+        return a;
+      }
+      // rexxar 200 但空：可能是真没有，也可能被静默限流，问一句 suggest 再定
+    } catch (e) {
+      const msg: string = (e as Error).message;
+      if (!/403|429|banned|rate_limit/i.test(msg)) {
+        throw e as Error;
+      }
+      hilog.warn(DOMAIN, TAG, 'rexxar blocked, try suggest: %{public}s', q);
+    }
+    return await PosterStore.querySuggest(q);
+  }
+
+  /**
+   * subject_suggest：老接口，免登录、配额宽松，返回 id/title/year/img。
+   * 没有 rating 字段，评分留给 rateOf(id) 按 id 补（那个接口不受搜索限流影响）。
+   */
+  private static async querySuggest(q: string): Promise<SuggestTarget[]> {
+    const url: string = 'https://movie.douban.com/j/subject_suggest?q=' + encodeURIComponent(q);
+    const text: string = await HttpUtil.getTextWith(url, 'https://movie.douban.com/', UA_DOUBAN);
+    const t: string = text.trim();
+    if (t.length === 0 || t.charAt(0) !== '[') {
+      throw new Error('suggest not json');
+    }
+    const rows: SuggestRow[] = JSON.parse(t) as SuggestRow[];
+    const out: SuggestTarget[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r: SuggestRow = rows[i];
+      const title: string = (r.title ?? '').trim();
+      if (title.length === 0) {
+        continue;
+      }
+      out.push({
+        id: (r.id ?? '').trim(),
+        title: title,
+        year: (r.year ?? '').trim(),
+        cover_url: (r.img ?? '').trim(),
+        ratingValue: -1
+      } as SuggestTarget);
+    }
+    return out;
+  }
+
   /** 按豆瓣 ID 取评分（subject_abstract；未开分时 rate 是空串） */
   private static async rateOf(id: string): Promise<number> {
     if (id.length === 0) {
@@ -982,7 +1052,7 @@ export class PosterStore {
     PosterStore.emptyStreak = 0;
     let alive: boolean = false;
     try {
-      const probe: SuggestTarget[] = await PosterStore.query('肖申克的救赎');
+      const probe: SuggestTarget[] = await PosterStore.lookup('肖申克的救赎');
       alive = probe.length > 0;
     } catch (e) {
       alive = false;
@@ -1046,14 +1116,14 @@ export class PosterStore {
     if (wBase.length === 0) {
       return null;
     }
+    const wSeason: number = PosterStore.seasonOf(want);
     // 同名多条目、又没有年份能确认时，直接放弃——错配的封面比没封面更误导人。
     // 实例：《来自远方》在豆瓣有 2021 美国歌舞（9.2 分）/ 2026 日本动画 / 2015 委内瑞拉
     // 三条同名条目，光看片名只能取排第一的那条，番剧就被配成欧美片的封面和剧照。
-    if (PosterStore.ambiguousTitle(list, wBase, year)) {
+    if (PosterStore.ambiguousTitle(list, wBase, year, wSeason)) {
       hilog.info(DOMAIN, TAG, 'ambiguous title, skip: %{public}s', want);
       return null;
     }
-    const wSeason: number = PosterStore.seasonOf(want);
     const y: string = year.trim();
     const hit: SuggestTarget | null = PosterStore.scanCands(list, wBase, wSeason, y, false);
     if (hit !== null) {
@@ -1074,7 +1144,49 @@ export class PosterStore {
         return h2;
       }
     }
-    return null;
+    // 最后一档：忽略连接词后再比。
+    // 实例：采集站片名带「&」而豆瓣片名用「和」，去掉标点后两种写法仍差一个连接词，
+    // 前面几档全部对不上，海报就永远刮不到。
+    return PosterStore.scanLoose(list, wBase, wSeason, y);
+  }
+
+  /** 去掉连接词，只用于"宽松比对"，不参与缓存 key */
+  private static rmJoin(s: string): string {
+    return s.replace(/[和与及＆&]/g, '');
+  }
+
+  /** 忽略连接词的一轮匹配：季号对上的优先，其次年份对上的 */
+  private static scanLoose(list: SuggestTarget[], wBase: string, wSeason: number,
+    y: string): SuggestTarget | null {
+    const want: string = PosterStore.rmJoin(wBase);
+    if (want.length === 0) {
+      return null;
+    }
+    let yearHit: SuggestTarget | null = null;
+    let seasonHit: SuggestTarget | null = null;
+    for (let i = 0; i < list.length; i++) {
+      const t: string = PosterStore.cleanTitle(list[i].title ?? '');
+      const cand: string = PosterStore.rmJoin(PosterStore.squash(PosterStore.baseOf(t)));
+      if (cand !== want) {
+        continue;
+      }
+      const cs: number = PosterStore.seasonOf(t);
+      const sameSeason: boolean = wSeason > 0 ? cs === wSeason : cs === 0;
+      const sameYear: boolean = y.length > 0 && (list[i].year ?? '').trim() === y;
+      if (sameSeason && sameYear) {
+        return list[i];
+      }
+      if (sameSeason && seasonHit === null) {
+        seasonHit = list[i];
+      }
+      if (sameYear && yearHit === null) {
+        yearHit = list[i];
+      }
+    }
+    if (seasonHit !== null) {
+      return seasonHit;
+    }
+    return yearHit;
   }
 
   /**
@@ -1086,7 +1198,8 @@ export class PosterStore {
    *   - 这些候选的年份全相同（或全为空）→ 视为同一部片的不同条目，不歧义
    *   - 其余情况（≥2 条同名、年份互不相同、目标年份对不上任何一条）→ 歧义
    */
-  private static ambiguousTitle(list: SuggestTarget[], wBase: string, year: string): boolean {
+  private static ambiguousTitle(list: SuggestTarget[], wBase: string, year: string,
+    wSeason: number): boolean {
     const y: string = (year ?? '').trim();
     const years: string[] = [];
     let same: number = 0;
@@ -1094,6 +1207,12 @@ export class PosterStore {
       const t: string = PosterStore.cleanTitle(list[i].title ?? '');
       const b: string = PosterStore.squash(PosterStore.baseOf(t));
       if (b !== wBase) {
+        continue;
+      }
+      // 季号不同就是不同的条目，不算「同名歧义」。
+      // 合集剧搜出来往往是 1/2/3/4 季各一条，
+      // 以前把四季都算进歧义，于是这些片永远被跳过、永远没海报。
+      if (wSeason > 0 && PosterStore.seasonOf(t) !== wSeason) {
         continue;
       }
       same++;

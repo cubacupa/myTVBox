@@ -155,12 +155,8 @@ struct Home {
   @StorageProp('ratingTick') ratingTick: number = 0;
   @StorageProp('posterTick') posterTick: number = 0;
   @StorageProp('backdropTick') @Watch('onBackdropTick') backdropTick: number = 0;
-  /** 站点外链海报本地化完成的信号：读一下即可让卡片重绘出图 */
-  @State picTick: number = 0;
-  /** url -> 本地 file:// 路径（本进程内已落盘的站点海报） */
-  private siteLocal: Map<string, string> = new Map<string, string>();
-  /** 正在下载的 url，别重复发请求 */
-  private siteFetching: Set<string> = new Set<string>();
+  /** 站点外链海报本地化完成的信号：读一下即可让卡片重绘出图（全局，三页共用） */
+  @StorageProp('sitePicTick') picTick: number = 0;
 
   private loadSeq: number = 0;
   /** 收藏 + 历史的指纹：返回首页时只有它变了才重新拉片单 */
@@ -830,46 +826,20 @@ struct Home {
   }
 
   /**
-   * 豆瓣图床直连回 418（Image 组件带不了 Referer），
-   * 这类地址必须先抓到本地再画 —— 详情页和 PosterCard 早就这么干了，
-   * 首页的随机推荐缩略图当初是直接画外链的，于是整排里凡是豆瓣图的就只剩黑框。
+   * 真正能画的地址。豆瓣图床回 418/403，QQ 音乐这类 http 明文外链在电视上也常画不出来，
+   * Image 组件又带不了 Referer —— 统一交给 ImageCache 本地化后再画。
+   * 读一下 picTick 让后台落地后本页跟着重绘。
    */
-  private isDoubanPic(u: string): boolean {
-    return u.indexOf('doubanio.com') >= 0;
-  }
-
-  /** 真正能画的地址：豆瓣图床只返回本地化结果，没下完返回空串（先显示占位，别留黑框） */
   private picReady(u: string): string {
-    if (this.picTick < 0 || !this.isDoubanPic(u)) {
+    if (this.picTick < 0) {
       return u;
     }
-    const hit: string | undefined = this.siteLocal.get(u);
-    return hit === undefined ? '' : hit;
+    return ImageCache.display(u);
   }
 
-  /** 把一个外链海报丢进本地化通道：已在盘里直接取，下好之后 +1 让卡片重绘 */
+  /** 投递外链海报本地化；完成后 ImageCache 会 +sitePicTick 触发重绘 */
   private warmPic(u: string): void {
-    if (u.length === 0 || !this.isDoubanPic(u)) {
-      return;
-    }
-    if (this.siteLocal.has(u) || this.siteFetching.has(u) || ImageCache.hasFailed(u)) {
-      return;
-    }
-    const hit: string = ImageCache.cached(u);
-    if (hit.length > 0) {
-      this.siteLocal.set(u, hit);
-      return;
-    }
-    this.siteFetching.add(u);
-    ImageCache.local(u, '').then((p: string) => {
-      this.siteFetching.delete(u);
-      if (p.length > 0) {
-        this.siteLocal.set(u, p);
-        this.picTick++;
-      }
-    }).catch(() => {
-      this.siteFetching.delete(u);
-    });
+    ImageCache.warm(u);
   }
 
   /** 主推位、缩略图、收藏/记录行里的外链海报统一预热一遍 */

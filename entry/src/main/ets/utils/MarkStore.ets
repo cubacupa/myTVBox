@@ -125,6 +125,32 @@ export class MarkStore {
   }
 
   /**
+   * 用详情页取到的最新海报地址修正历史 / 收藏里的旧值。
+   * 图床域名会失效，老记录存的地址早就打不开了；
+   * 详情页每打开一次就顺手刷新，列表页才不会一直守着死链显示空框。
+   * 只改 pic 字段，不动 time / 不重排，点开看一眼不会把记录顶到最前。
+   */
+  static patchPic(ctx: common.Context, siteKey: string, vodId: string, pic: string): void {
+    if (pic.length === 0 || (!pic.startsWith('http') && !pic.startsWith('file'))) {
+      return;
+    }
+    const names: string[] = [F_HIS, F_FAV];
+    for (let i = 0; i < names.length; i++) {
+      const list: VodMark[] = MarkStore.read(ctx, names[i]);
+      let changed: boolean = false;
+      for (const m of list) {
+        if (m.siteKey === siteKey && m.vodId === vodId && m.pic !== pic) {
+          m.pic = pic;
+          changed = true;
+        }
+      }
+      if (changed) {
+        MarkStore.write(ctx, names[i], list);
+      }
+    }
+  }
+
+  /**
    * 给老历史记录补分类名：详情页打开旧片子时顺手补上，历史页就能精确隐藏敏感分类。
    * 只改字段，不动 time、不重排，所以「点开看一眼」不会把旧记录顶到列表最前。
    */

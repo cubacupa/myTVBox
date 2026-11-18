@@ -268,6 +268,11 @@ struct Detail {
       // 升级前的历史记录没有分类名，点开一次就补上（不改时间、不重排），
       // 历史页才能精确判断它属不属于敏感词分类
       MarkStore.patchHistoryType(ctx, this.siteKey, this.vodId, this.typeName);
+      // 站点换图床后老记录里的海报地址会变成死链，用刚取到的新地址修正，
+      // 历史 / 收藏页下次进来就能显示（不改时间、不重排）
+      if (this.pic.length > 0) {
+        MarkStore.patchPic(ctx, this.siteKey, this.vodId, this.pic);
+      }
       this.year = d.vod_year ?? '';
       this.content = (d.vod_content ?? '').replace(/<[^>]+>/g, '');
       this.lines = SiteApi.parseLines(d);

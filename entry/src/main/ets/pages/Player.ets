@@ -4,11 +4,13 @@ import { KeyCode } from '@kit.InputKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { PlayProgress } from '../utils/PlayProgress';
 import { PlayUrlResolver } from '../utils/PlayUrlResolver';
 import { PosterStore } from '../utils/PosterStore';
 import { RatingStore } from '../utils/RatingStore';
 import { LiveMarkStore } from '../utils/LiveMarkStore';
+import { LocalPrefetch } from '../utils/LocalPrefetch';
 import { AppState } from '../utils/AppState';
 import { SniffWeb } from '../components/SniffWeb';
 import { sniffer } from '../utils/WebSniffer';
@@ -101,6 +103,8 @@ struct Player {
    * 让人以为是自己按错了。现在多一个连接中状态，只有播起来之后停住才叫暂停。
    */
   @State connecting: boolean = true;
+  /** 直链预取进度（0-100）：-1 表示当前不走预取，界面不显示 */
+  @State fetchPct: number = -1;
   /** 直播线路序号（1 起）与总数，用于「线路 2/5」和换线路按钮 */
   @State lineNo: number = 1;
   @State lineCount: number = 0;
@@ -136,6 +140,11 @@ struct Player {
   private preparedReady: boolean = false;
   private surfaceReady: boolean = false;
   private started: boolean = false;
+  /** 有一次跳转正在等本地缓存追上：期间不再接受新的跳转，避免连环 seek */
+  private pendingSeek: boolean = false;
+  /** 预取到本地的文件：路径与文件句柄（播放器要用 fdSrc 播它） */
+  private localPath: string = '';
+  private localFd: number = -1;
   private inited: boolean = false;
   private prepareCalled: boolean = false;
   private savedProgress: number = 0;
@@ -295,6 +304,9 @@ struct Player {
     try {
       if (needResolve) {
         playUrl = await PlayUrlResolver.resolve(this.rawUrl, this.pickJx());
+      } else {
+        // 直链也过一遍：接口/规则站给的地址可能把 ? 写成了 &
+        playUrl = PlayUrlResolver.normalizeMediaUrl(this.rawUrl);
       }
     } catch (e) {
       this.resolving = false;
@@ -309,11 +321,51 @@ struct Player {
       return;
     }
     this.playUrl = playUrl;
-    await this.initPlayer(playUrl);
+    let target: string = playUrl;
+    if (!this.isLive && this.ctx !== null && LocalPrefetch.canPrefetch(playUrl)) {
+      target = await this.prefetchLocally(playUrl);
+    } else {
+      LocalPrefetch.cancel();
+      this.fetchPct = -1;
+    }
+    await this.initPlayer(target);
+  }
+
+  /**
+   * 直链 mp4 先拉到本地再播。
+   *
+   * 这类签名直链的 CDN 卡的是「请求次数」：一次要 24MB 没问题，
+   * 一分钟要十几次就 403（等一分钟才恢复）。播放器正好是按小块狂要的那种，
+   * 于是播一两分钟就断流、每帧报 stream is unsupported。
+   * 换成 App 自己用几次大块请求拉下来，播放器只读本地文件，问题就不存在了。
+   *
+   * 拉不到就回落成网络直连，功能不因此变差。
+   */
+  private async prefetchLocally(url: string): Promise<string> {
+    const ctx: common.Context | null = this.ctx;
+    if (ctx === null) {
+      return url;
+    }
+    this.fetchPct = 0;
+    try {
+      const path: string = await LocalPrefetch.begin(ctx, url,
+        (done: number, total: number) => {
+          this.fetchPct = total > 0 ? Math.min(99, Math.round(done * 100 / total)) : 0;
+        });
+      this.fetchPct = -1;
+      hilog.info(DOMAIN, TAG, 'prefetch ready: %{public}s', path);
+      return path;
+    } catch (e) {
+      this.fetchPct = -1;
+      hilog.warn(DOMAIN, TAG, 'prefetch failed, fallback to network: %{public}s',
+        (e as Error).message);
+      return url;
+    }
   }
 
   private async initPlayer(url: string): Promise<void> {
-    if (!PlayUrlResolver.isHttpUrl(url)) {
+    const isLocal: boolean = url.startsWith('/');
+    if (!PlayUrlResolver.isHttpUrl(url) && !isLocal) {
       // 交给 AVPlayer 只会得到 "unsupported type"，先拦下来给出可读原因
       this.connecting = false;
       this.errMsg = '播放地址不是 http(s) 链接，播放器无法识别：\n' + url;
@@ -437,7 +489,22 @@ struct Player {
       // 例外：带签名的 CDN 直链（腾讯 dis_k、天翼云 X-Amz-* 等）鉴权已在 URL 里，
       // 再带 Referer 反而命中防盗链返回 404（播放器报 5411007），实测确认。
       const ref: string = PlayUrlResolver.isSelfSigned(url) ? '' : sniffer.refererOf(url);
-      if (ref.length > 0) {
+      if (isLocal) {
+        // 本地预取文件：AVPlayer 的 url 只认网络地址或 fd://，本地文件必须走 fdSrc
+        this.closeLocalFd();
+        const f: fs.File = fs.openSync(url, fs.OpenMode.READ_ONLY);
+        this.localPath = url;
+        this.localFd = f.fd;
+        let size: number = 0;
+        try {
+          size = fs.statSync(url).size;
+        } catch (e) {
+          size = 0;
+        }
+        const src: media.AVFileDescriptor = { fd: f.fd, offset: 0, length: size };
+        p.fdSrc = src;
+        hilog.info(DOMAIN, TAG, 'play local, %{public}d bytes', size);
+      } else if (ref.length > 0) {
         const hs: Record<string, string> = JSON.parse('{}') as Record<string, string>;
         hs['Referer'] = ref;
         try {
@@ -661,6 +728,19 @@ struct Player {
     if (p) {
       p.release().catch(() => {});
     }
+    // 本地预取文件的句柄要跟着播放器一起放掉，不然下次打开会占着文件
+    this.closeLocalFd();
+  }
+
+  private closeLocalFd(): void {
+    if (this.localFd >= 0) {
+      try {
+        fs.closeSync(this.localFd);
+      } catch (e) {
+        // 已关闭
+      }
+      this.localFd = -1;
+    }
   }
 
   /** 播起来之后记下这条线路，下次点同一频道直接用它 */
@@ -841,16 +921,26 @@ struct Player {
       return;
     }
     this.started = true;
-    if (!this.isLive && this.savedProgress > 0 && this.savedProgress < this.durTime - 3000) {
+    const resume: number = this.savedProgress;
+    const canResume: boolean = !this.isLive && resume > 0 && resume < this.durTime - 3000;
+    const resumeByte: number = canResume ? this.byteOf(resume) : 0;
+    if (canResume && resumeByte <= LocalPrefetch.readyByte()) {
       try {
-        this.player.seek(this.savedProgress, media.SeekMode.SEEK_PREV_SYNC);
-        this.curTime = this.savedProgress;
+        this.player.seek(resume, media.SeekMode.SEEK_PREV_SYNC);
+        this.curTime = resume;
         // 续播起跳同样要重新拉流；且 curTime 已被设成正值，
         // 绕过了上面 curTime <= 0 的起播预缓冲过滤，必须靠这里豁免
         this.markUserSeek();
       } catch (e) {
         // seek 失败则从头播
       }
+    } else if (canResume && LocalPrefetch.isActive()) {
+      // 续播位置还没轮到下载：先从头放，缓存追上再跳过去，别让播放器读空区
+      LocalPrefetch.waitByte(resumeByte, 120000).then(() => {
+        if (LocalPrefetch.readyByte() >= resumeByte) {
+          this.seekCached(resume);
+        }
+      });
     }
     this.player.play().then(() => {
       this.isPlaying = true;
@@ -958,9 +1048,7 @@ struct Player {
     if (this.durTime > 0 && t > this.durTime) {
       t = this.durTime;
     }
-    this.player.seek(t, media.SeekMode.SEEK_PREV_SYNC);
-    this.curTime = t;
-    this.markUserSeek();
+    this.seekCached(t);
   }
 
   /**
@@ -1002,16 +1090,8 @@ struct Player {
     }
     // 留 1 秒余量，别让点到最右端时立刻触发播放结束
     const t: number = Math.floor(ratio * Math.max(this.durTime - 1000, 0));
-    try {
-      this.player.seek(t, media.SeekMode.SEEK_PREV_SYNC);
-      this.curTime = t;
-      this.markUserSeek();
-      this.showTip('跳转至 ' + this.fmt(t));
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'bar seek failed: %{public}s', (e as Error).message);
-      this.showTip('跳转失败，可换条线路再试');
-      return;
-    }
+    this.seekCached(t);
+    this.showTip('跳转至 ' + this.fmt(t));
     if (this.uiVisible) {
       this.scheduleHide();
     }
@@ -1118,22 +1198,76 @@ struct Player {
 
   /** 绝对时间跳转：长按松手用；落点计算与点进度条保持一致 */
   private seekTo(t: number): void {
+    this.seekCached(t);
+  }
+
+  /**
+   * 本地缓存还没下到这一段时，先等下载追上再跳。
+   *
+   * 播放器读的是本地文件，未下载区域是全零——直接 seek 过去会被当成坏码流，
+   * 报的正是「stream is unsupported」。所以跳转一律先问一句：这段落地了没有。
+   */
+  private seekCached(t: number): void {
     if (!this.player || this.isLive) {
       return;
     }
+    const total: number = LocalPrefetch.totalByte();
+    const ready: number = LocalPrefetch.readyByte();
+    if (!LocalPrefetch.isActive() || total <= 0 || this.durTime <= 0) {
+      this.doSeek(t);
+      return;
+    }
+    const byte: number = Math.floor(t / this.durTime * total);
+    if (byte <= ready) {
+      this.doSeek(t);
+      return;
+    }
+    if (this.pendingSeek) {
+      return;
+    }
+    this.pendingSeek = true;
+    this.showTip('正在缓存这一段…');
+    LocalPrefetch.waitByte(byte, 120000).then(() => {
+      this.pendingSeek = false;
+      const nowReady: number = LocalPrefetch.readyByte();
+      if (nowReady >= byte) {
+        this.doSeek(t);
+        return;
+      }
+      // 等不上了：退到已经落地的地方，别让播放器去读空区
+      const at: number = this.durTime * nowReady / total;
+      this.showTip('这一段还没缓存完，先播到能放的位置');
+      this.doSeek(this.clampSeek(at - 5));
+    });
+  }
+
+  /** 真正落 seek 的唯一出口：顺带把 curTime 与缓冲豁免一起更新 */
+  private doSeek(t: number): void {
     const target: number = this.clampSeek(t);
+    const p: media.AVPlayer | null = this.player;
+    if (p === null) {
+      return;
+    }
     try {
-      this.player.seek(target, media.SeekMode.SEEK_PREV_SYNC);
+      p.seek(target, media.SeekMode.SEEK_PREV_SYNC);
       this.curTime = target;
       this.markUserSeek();
     } catch (e) {
-      hilog.error(DOMAIN, TAG, 'hold seek failed: %{public}s', (e as Error).message);
+      hilog.error(DOMAIN, TAG, 'seek failed: %{public}s', (e as Error).message);
       this.showTip('跳转失败，可换条线路再试');
     }
   }
 
-  private clampSeek(t: number): number {
-    let v: number = t < 0 ? 0 : t;
+  /** 时间点换算成文件字节位置（按平均码率估，只用于判断「这段下到了没有」） */
+  private byteOf(sec: number): number {
+    const total: number = LocalPrefetch.totalByte();
+    if (total <= 0 || this.durTime <= 0) {
+      return 0;
+    }
+    return Math.floor(sec / this.durTime * total);
+  }
+
+  private clampSeek(t: number): number {    let v: number = t < 0 ? 0 : t;
     // 留 1 秒余量，别让跳到最右端立刻触发播放结束（和点进度条一致）
     if (this.durTime > 1000 && v > this.durTime - 1000) {
       v = this.durTime - 1000;
@@ -1342,6 +1476,8 @@ struct Player {
     RatingStore.resume();
     this.clearWatchdog();
     this.gen++;
+    // 离场就停掉后台下载，别让它在后台白跑流量
+    LocalPrefetch.cancel();
     // 退出时只丢弃未松手的预览，不要再跳一次
     this.cancelSeek();
     this.clearHide();
@@ -1600,11 +1736,13 @@ struct Player {
           // 解析完成但还没播起来：这里以前会落到「已暂停」，看着像自己按错了
           Column() {
             LoadingProgress().width(50).height(50)
-            Text(this.isLive && this.lineCount > 1
-              ? '连接中… 线路 ' + this.lineNo + '/' + this.lineCount
-              : '连接中…')
+            Text(this.fetchPct >= 0
+              ? '正在缓存 ' + this.fetchPct + '%'
+              : (this.isLive && this.lineCount > 1
+                ? '连接中… 线路 ' + this.lineNo + '/' + this.lineCount
+                : '连接中…'))
               .fontColor('#ffffff').fontSize(16).margin({ top: 10 })
-            if (this.isLive && this.lineCount > 1) {
+            if (this.fetchPct < 0 && this.isLive && this.lineCount > 1) {
               Text('这条放不出来会自动试下一条')
                 .fontColor('#bbbbbb').fontSize(13).margin({ top: 6 })
             }
