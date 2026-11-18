@@ -382,6 +382,57 @@ async function fetchText(url: string): Promise<string> {
   return body.trim();
 }
 
+// ---------------- 规则名大小写不敏感 ----------------
+
+/**
+ * 官方规则库的文件清单（只取名字，进程内缓存一次）。
+ *
+ * 为什么需要：GitHub raw 的路径**区分大小写**，规则实际叫 giriGiriLove，
+ * 用户敲 girigirlove 就 404。电视上靠遥控器输大小写本来就难受，
+ * 所以拿 jsdelivr 的包清单做一次「忽略大小写」的归一化，把真名找回来。
+ */
+let ruleNameCache: string[] | null = null;
+
+async function ruleNameList(): Promise<string[]> {
+  if (ruleNameCache !== null) {
+    return ruleNameCache;
+  }
+  const out: string[] = [];
+  try {
+    const txt: string = await fetchText(
+      'https://data.jsdelivr.com/v1/packages/gh/Predidit/KazumiRules@main?structure=flat');
+    const root: Record<string, Object> | null = J.obj(JSON.parse(txt) as Object);
+    if (root !== null) {
+      for (const f of J.arrOf(root['files'])) {
+        const o: Record<string, Object> | null = J.obj(f);
+        let n: string = o === null ? '' : J.str(o, 'name', '');
+        if (n.startsWith('/')) {
+          n = n.substring(1);
+        }
+        if (n.toLowerCase().endsWith('.json')) {
+          out.push(n.substring(0, n.length - 5));
+        }
+      }
+    }
+  } catch (e) {
+    // 清单拿不到就当没有：下面还会按用户输入的原样再试一次
+  }
+  ruleNameCache = out;
+  return out;
+}
+
+/** 在官方清单里按忽略大小写找真名；找不到返回空串 */
+async function resolveRuleName(want: string): Promise<string> {
+  const list: string[] = await ruleNameList();
+  const low: string = want.toLowerCase();
+  for (const n of list) {
+    if (n.toLowerCase() === low) {
+      return n;
+    }
+  }
+  return '';
+}
+
 /**
  * 统一入口：用户输入「规则名」/「规则链接」/「整段规则 JSON」都能吃。
  * 规则名按官方两个镜像依次试；链接失败时再试 github 网页链接与 jsdelivr 镜像。
@@ -396,6 +447,7 @@ export async function loadRuleSite(input: string): Promise<RuleSiteResult> {
   }
 
   const urls: string[] = [];
+  let nameMode: string = '';
   if (/^https?:\/\//i.test(raw)) {
     urls.push(raw);
     const r1: string = blobToRaw(raw);
@@ -416,6 +468,7 @@ export async function loadRuleSite(input: string): Promise<RuleSiteResult> {
     if (!/^[A-Za-z0-9_.\-]+$/.test(nm)) {
       return { site: null, msg: '填规则名（如 giriGiriLove）或规则链接' };
     }
+    nameMode = nm;
     for (const b of RULE_REPOS) {
       urls.push(b + nm + '.json');
     }
@@ -434,6 +487,28 @@ export async function loadRuleSite(input: string): Promise<RuleSiteResult> {
       lastErr = (e as Error).message;
     }
   }
+
+  // 名字模式下没取到，八成是大小写不对：归一化成官方真名再试一轮
+  if (nameMode.length > 0) {
+    const real: string = await resolveRuleName(nameMode);
+    if (real.length > 0 && real !== nameMode) {
+      for (const b of RULE_REPOS) {
+        try {
+          const txt: string = await fetchText(b + real + '.json');
+          if (txt.startsWith('{')) {
+            const got: RuleSiteResult = ruleToSite(txt);
+            if (got.site !== null) {
+              got.msg = got.msg + '（按 ' + real + ' 匹配）';
+            }
+            return got;
+          }
+        } catch (e) {
+          lastErr = (e as Error).message;
+        }
+      }
+    }
+  }
+
   if (lastErr.indexOf('404') >= 0) {
     lastErr = '没有这条规则（规则名拼错了？）';
   }
@@ -684,6 +759,12 @@ export class KazumiRuleApi {
     const text: string = await requestText(r.searchApi, vars);
     const root: Object = JSON.parse(text) as Object;
     const rows: Object[] = pick(root, r.searchListPath);
+    const items: VodItem[] = KazumiRuleApi.rowsToItems(r, rows);
+    return { items: items, total: KazumiRuleApi.totalOf(root, items.length) };
+  }
+
+  /** 一页数据行 → 列表项：搜索与分类浏览共用同一套字段映射 */
+  private static rowsToItems(r: KazumiRule, rows: Object[]): VodItem[] {
     const items: VodItem[] = [];
     for (const row of rows) {
       const name: string = pickStr(row, r.searchNamePath, '');
@@ -718,7 +799,12 @@ export class KazumiRuleApi {
       };
       items.push(item);
     }
-    let total: number = items.length;
+    return items;
+  }
+
+  /** 站点自报的总条数；规则没给就退回本页条数 */
+  private static totalOf(root: Object, fallback: number): number {
+    let total: number = fallback;
     for (const p of ['$.info.total', '$.total', '$.data.total']) {
       const s: string = pickStr(root, p, '');
       if (s.length > 0) {
@@ -729,7 +815,83 @@ export class KazumiRuleApi {
         }
       }
     }
-    return { items: items, total: total };
+    return total;
+  }
+
+  /** 列表接口 → 分类接口：`…/Vod/get_list` ⇒ `…/Vod/get_class` */
+  private static classUrlOf(listUrl: string): string {
+    const i: number = listUrl.lastIndexOf('/get_list');
+    return i > 0 ? listUrl.substring(0, i) + '/get_class' : '';
+  }
+
+  /**
+   * 站点自报的分类名。Kazumi 规则没有分类字段，但这类自建 API 后端
+   * （m3u8 站常见的 get_list / get_class 一对）会单独给一份类型清单，
+   * 拿回来后点播页就能铺二级分类。取不到就返回空数组，调用方隐藏入口。
+   */
+  static async apiClasses(r: KazumiRule): Promise<string[]> {
+    const out: string[] = [];
+    if (r.searchApi === null) {
+      return out;
+    }
+    const u: string = KazumiRuleApi.classUrlOf(r.searchApi.url);
+    if (u.length === 0) {
+      return out;
+    }
+    try {
+      const txt: string = await fetchText(u);
+      const root: Object = JSON.parse(txt) as Object;
+      for (const v of pick(root, '$.info.rows[*]')) {
+        const s: string = typeof v === 'string' ? (v as string) : '';
+        if (s.length > 0 && out.indexOf(s) < 0) {
+          out.push(s);
+        }
+      }
+    } catch (e) {
+      return out;
+    }
+    return out;
+  }
+
+  /**
+   * 按分类翻页。和 search 的区别只有两点：去掉搜索词、加上分类字段，
+   * 分页仍用 offset（这类接口都是 offset+limit，没有页码概念）。
+   */
+  static async browseApiClass(r: KazumiRule, className: string, page: number): Promise<KazumiListResult> {
+    const empty: KazumiListResult = { items: new Array<VodItem>(), total: 0 };
+    if (r.searchApi === null) {
+      return empty;
+    }
+    const srcQ: Record<string, Object> =
+      r.searchApi.query === undefined ? JSON.parse('{}') as Record<string, Object> : r.searchApi.query;
+    // 搜索词的键名各站不同（vod_name / wd / keyword），按值认出来扔掉，
+    // 否则空搜索词会被后端当成「片名等于空串」而返回 0 条
+    const q: Record<string, Object> = JSON.parse('{}') as Record<string, Object>;
+    for (const k of Object.keys(srcQ)) {
+      if (String(srcQ[k]) === '@keyword') {
+        continue;
+      }
+      q[k] = srcQ[k];
+    }
+    q['vod_class'] = '@class';
+    const limit: number = Number(q['limit'] ?? 24) || 24;
+    const vars: Record<string, Object> = JSON.parse(
+      '{"class":"","page":"","offset":""}') as Record<string, Object>;
+    vars['class'] = className;
+    vars['page'] = String(page);
+    vars['offset'] = String((page - 1) * limit);
+    const req: ApiRequest = {
+      method: r.searchApi.method,
+      url: r.searchApi.url,
+      query: q,
+      headers: r.searchApi.headers,
+      bodyType: r.searchApi.bodyType,
+      body: r.searchApi.body
+    };
+    const text: string = await requestText(req, vars);
+    const root: Object = JSON.parse(text) as Object;
+    const items: VodItem[] = KazumiRuleApi.rowsToItems(r, pick(root, r.searchListPath));
+    return { items: items, total: KazumiRuleApi.totalOf(root, items.length) };
   }
 
   static async getDetail(r: KazumiRule, source: string): Promise<VodDetail | null> {

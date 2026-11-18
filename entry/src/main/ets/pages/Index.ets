@@ -38,6 +38,8 @@ const SORT_ASC_KEY: string = 'indexSortAsc';
  * 列表走站点自己的 vodshow 页面，滚动到底继续抓下一页。
  */
 const RC_PREFIX: string = '__rc';
+/** 规则站「API 后端自报分类」的二级分类 id 前缀 */
+const AC_PREFIX: string = '__ac';
 const RULE_TOP: string = '__rule_all';
 
 /** 统一的一页结果：普通站来自 CMS 接口，规则站来自网页列表 */
@@ -125,6 +127,8 @@ struct Index {
   @State sels: FilterSel[] = [];
   /** 当前站的网页分类预设（规则站才有，普通采集站为空） */
   @State ruleCats: RuleCategory[] = [];
+  /** 规则站 API 后端自报的分类名（有 get_class 的站才有），优先级高于网页分类 */
+  @State ruleApiCats: string[] = [];
   private ruleObj: KazumiRule | null = null;
   @State showFilter: boolean = false;
   @State sortMode: string = SORT_NEW;
@@ -421,11 +425,34 @@ struct Index {
     return n;
   }
 
+  /** 二级分类 id → API 分类名；不是 API 分类返回空串（「全部」也用这个前缀，下标 0） */
+  private apiCatName(id: string): string {
+    if (id.indexOf(AC_PREFIX) !== 0) {
+      return '';
+    }
+    const n: number = Number(id.substring(AC_PREFIX.length));
+    if (Number.isNaN(n) || n < 0 || n > this.ruleApiCats.length) {
+      return '';
+    }
+    // 下标 0 是「全部」：不带分类参数，其余按名字过滤
+    return n === 0 ? '' : this.ruleApiCats[n - 1];
+  }
+
   /**
    * 取一页结果。规则站的分类走站点自己的网页列表（隐藏 WebView 抓 XPath），
    * 其余站点照旧走 CMS 接口 —— 上层（首屏、切分类、滚动加载）只认这个方法。
    */
   private async pageOf(site: SiteCfg, classId: string, page: number): Promise<PageResult> {
+    if (classId.indexOf(AC_PREFIX) === 0 && this.ruleObj !== null) {
+      const got = await KazumiRuleApi.browseApiClass(this.ruleObj, this.apiCatName(classId), page);
+      // 这类接口只有 offset 没有总页数：这一页不空就认为还能往下翻
+      const out: PageResult = {
+        items: got.items,
+        pageCount: got.items.length > 0 ? page + 1 : page,
+        total: got.total
+      };
+      return out;
+    }
     const idx: number = this.ruleCatIndex(classId);
     if (idx >= 0 && this.ruleObj !== null) {
       const got = await KazumiRuleApi.browseCategory(this.ruleObj, this.ruleCats[idx], page);
@@ -489,6 +516,49 @@ struct Index {
     }
   }
 
+  /**
+   * 规则站的后端自报分类：把 get_class 拿到的名字挂到二级分类栏，前面补一个「全部」。
+   * 和网页分类的区别是无需 WebView，一次 JSON 请求就够，所以首屏更快。
+   */
+  private async loadApiCats(site: SiteCfg, seq: number): Promise<void> {
+    const top: VodClass = { type_id: RULE_TOP, type_name: '全部分类' };
+    this.classes = [];
+    this.applyTops([top]);
+    this.curTop = RULE_TOP;
+
+    const subs: VodClass[] = [];
+    subs.push({ type_id: AC_PREFIX + '0', type_name: '全部' });
+    for (let i = 0; i < this.ruleApiCats.length; i++) {
+      subs.push({
+        type_id: AC_PREFIX + (i + 1).toString(),
+        type_name: this.ruleApiCats[i]
+      });
+    }
+    this.applySubs(subs);
+    this.curClass = subs[0].type_id;
+
+    // 分类接口不吃地区/年份那套筛选，别把筛选栏摆出来当摆设
+    this.filterGroups = [];
+    this.sels = [];
+
+    const r = await this.pageOf(site, this.curClass, 1);
+    if (seq !== this.loadSeq) {
+      return;
+    }
+    this.lastSig = this.sigOf(r.items);
+    this.classNote = '';
+    this.raw = r.items;
+    this.items = this.withSort(this.raw);
+    this.page = 1;
+    this.pageCount = r.pageCount;
+    // 这类接口确实给总数，直接显示
+    this.totalCount = r.total;
+    RatingStore.warm(this.items);
+    if (this.items.length === 0) {
+      this.err = '这个分类没有返回内容，换个分类或直接搜索';
+    }
+  }
+
   private async loadAll(): Promise<void> {
     const site = AppState.currentSite;
     if (site === null) {
@@ -510,9 +580,22 @@ struct Index {
         : categoriesFor(rule.baseURL, rule.searchURL);
       this.ruleObj = rule;
       this.ruleCats = cats;
+      this.ruleApiCats = [];
       if (rule !== null && cats.length > 0) {
         await this.loadRuleCats(site, seq);
         return;
+      }
+      // 规则没有网页分类预设，但后端带 get_class 的话，分类自己会上报
+      if (rule !== null && KazumiRuleApi.isApiRule(rule)) {
+        const apiCats: string[] = await KazumiRuleApi.apiClasses(rule);
+        if (seq !== this.loadSeq) {
+          return;
+        }
+        this.ruleApiCats = apiCats;
+        if (apiCats.length > 0) {
+          await this.loadApiCats(site, seq);
+          return;
+        }
       }
       // type_id / type_pid 有的站给数字、有的给字符串。先在这里统一成字符串，
       // 否则界面里 `c.type_id === curClass` 会退化成 number 与 string 比较，
@@ -1197,6 +1280,7 @@ struct Index {
     this.lockedTopCount = 0;
     this.subs = [];
     this.ruleCats = [];
+    this.ruleApiCats = [];
     this.ruleObj = null;
     this.curTop = '';
     this.curClass = '';
