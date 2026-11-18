@@ -434,6 +434,13 @@ class WebSnifferImpl {
       'function nmOf(el){var t=el?(String(el.textContent||"").trim()):"";' +
       'var a=el&&el.getAttribute?String(el.getAttribute("title")||"").trim():"";' +
       'return a.length>t.length?a:t;}' +
+      // 懒加载站点把真图放 data-src/data-original，src 常是有效但纯色的占位图
+      // （onError 不触发，界面就一直黑框）。先跳过占位图取真地址，全是占位再兜第一个。
+      'function picOf(im){if(!im||!im.getAttribute)return "";' +
+      'var c=[im.getAttribute("data-src"),im.getAttribute("data-original"),im.getAttribute("src")];' +
+      'var bad=/(placeholder|loading|lazy|blank|nopic|no[_-]?pic|default)|^data:/i;' +
+      'var k,v;for(k=0;k<c.length;k++){v=String(c[k]||"").trim();if(v&&!bad.test(v))return v;}' +
+      'for(k=0;k<c.length;k++){v=String(c[k]||"").trim();if(v)return v;}return "";}' +
       'var rows=q(' + JSON.stringify(list) + ',null,true);var out=[];' +
       'for(var i=0;i<rows.length;i++){' +
       'var nm=q(' + JSON.stringify(name) + ',rows[i],false)[0];' +
@@ -445,8 +452,7 @@ class WebSnifferImpl {
       // 海报可选：懒加载站点的真地址常在 src / data-src / data-original 上，挨个兜
       'var ps="";var pp=' + JSON.stringify(pic) + ';' +
       'if(pp&&pp.length){var im=q(pp,rows[i],false)[0];' +
-      'if(im&&im.getAttribute){ps=String(im.getAttribute("src")||im.getAttribute("data-src")||' +
-      'im.getAttribute("data-original")||"");}' +
+      'ps=picOf(im);' +
       'if(ps.indexOf("//")===0)ps=location.protocol+ps;' +
       'else if(ps.charAt(0)==="/")ps=location.origin+ps;}' +
       'if(n&&u)out.push({name:n,href:u,pic:ps});}' +
