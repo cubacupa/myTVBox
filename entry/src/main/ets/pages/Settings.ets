@@ -933,21 +933,18 @@ struct Settings {
                 // ---------- Kazumi 规则：填规则名或链接，回车即载入 ----------
                 Divider().color('#1A1B22').margin({ top: 14, bottom: 12 })
 
-                Row({ space: 10 }) {
-                  Text('Kazumi 规则')
-                    .fontSize(13).fontColor('#8E8E9A')
-                    .maxLines(1)
+                Row() {
                   TextInput({
                     text: this.ruleText,
                     placeholder: '规则名或规则链接，如 giriGiriLove'
                   })
                     .layoutWeight(1)
                     .height(46)
-                    .fontSize(13)
+                    .fontSize(14)
                     .fontColor('#FFFFFF')
                     .placeholderColor('#5C5C68')
                     // 不显式给占位符字号，它会回落到系统默认 16fp，比正文粗大一截
-                    .placeholderFont({ size: 13, weight: FontWeight.Normal })
+                    .placeholderFont({ size: 14, weight: FontWeight.Normal })
                     .backgroundColor(C_INPUT)
                     .borderRadius(12)
                     .border({ width: 1, color: '#20212A' })
@@ -955,22 +952,27 @@ struct Settings {
                     .enterKeyType(EnterKeyType.Go)
                     .onChange((v: string) => { this.ruleText = v; })
                     .onSubmit(() => { this.loadRule(); })
+                }
+                .width('100%')
+
+                // 按钮同上：另起一行靠右，和「点播源」那块保持一致
+                Row() {
                   Button(this.ruleBusy ? '载入中…' : '载入')
                     .height(46).fontSize(14).fontColor('#150A04').backgroundColor('#FF8A3D')
                     .borderRadius(12)
                     .onClick(() => { this.loadRule(); })
                   Button('清空')
                     .height(46).fontSize(14).fontColor('#B9B9C4').backgroundColor('#232530')
-                    .borderRadius(12)
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.ruleText = ''; })
                   Button('手机推送')
                     .height(46).fontSize(13).fontColor('#8ED0FF').backgroundColor('#152B33')
-                    .borderRadius(12)
+                    .borderRadius(12).margin({ left: 10 })
                     .onClick(() => { this.openPush('rule'); })
                 }
                 .width('100%')
-                .margin({ top: 2 })
-                .alignItems(VerticalAlign.Center)
+                .justifyContent(FlexAlign.End)
+                .margin({ top: 10 })
               }
               .width('100%')
               .padding({ left: 20, right: 20, top: 6, bottom: 18 })
