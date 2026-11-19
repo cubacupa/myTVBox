@@ -17,7 +17,7 @@ function needLocalPic(u: string): boolean {
  *   0 占位框（灰底 + 片名首字 + "暂无海报"）—— 永远在，兜住所有失败情况
  *   1 站点自带的 vod_pic —— 有地址就画，失败时退回占位框
  *   2 豆瓣刮削图（本地沙箱文件）—— 盖在站点图之上，因为它是补缺/替换用的
- *   3 底部压暗 + 角标：左上年份、右下评分 —— 用显式 zIndex(10) 钉死，
+ *   3 底部压暗 + 角标：左上年份、右上 4K、右下评分 —— 用显式 zIndex(10) 钉死，
  *     否则刮削图一到位就把角标盖掉了（海报和评分经常是同一帧里先后到达的）。
  *
  * 只有一套视觉：暗底 + 琥珀、卡宽卡高由外部传，焦点用白色内描边 + 暖色外发光。
@@ -128,6 +128,19 @@ export struct PosterCard {
     return '';
   }
 
+  /**
+   * 4K 角标判定。列表接口给不出真实分辨率，只能看文字线索：
+   * 片名 / 备注（"更新4K"）/ 分类名 里出现 4K 或 2160 就点亮。
+   * 宁可打错也不漏——角标只是提示，点进去详情页才知道线路真不真。
+   */
+  private is4k(): boolean {
+    const n: string = this.item.vod_name ? this.item.vod_name : '';
+    const r: string = this.item.vod_remarks ? this.item.vod_remarks : '';
+    const t: string = this.item.type_name ? this.item.type_name : '';
+    const s: string = (n + ' ' + r + ' ' + t).toUpperCase();
+    return s.indexOf('4K') >= 0 || s.indexOf('2160') >= 0 || s.indexOf('UHD') >= 0;
+  }
+
   /** 豆瓣评分文字（"8.9"）；没分返回空串。读一下 ratingTick 让后台补分后能触发重绘 */
   private scoreText(): string {
     if (this.ratingTick < 0 || this.posterTick < 0) {
@@ -235,7 +248,27 @@ export struct PosterCard {
           .hitTestBehavior(HitTestMode.None)
         }
 
-        // ---- 第 5 层：右下角评分，永远最上 ----
+        // ---- 第 5 层：右上角 4K 角标 ----
+        if (this.is4k()) {
+          Column() {
+            Text('4K')
+              .fontSize(12)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#150A04')
+              .backgroundColor('#FF8A3D')
+              .borderRadius(5)
+              .padding({ left: 6, right: 6, top: 1, bottom: 2 })
+          }
+          .width('100%')
+          .height(this.cardH)
+          .justifyContent(FlexAlign.Start)
+          .alignItems(HorizontalAlign.End)
+          .padding({ right: 8, top: 8 })
+          .zIndex(11)
+          .hitTestBehavior(HitTestMode.None)
+        }
+
+        // ---- 第 6 层：右下角评分，永远最上 ----
         if (this.scoreText().length > 0) {
           Column() {
             Text('★ ' + this.scoreText())

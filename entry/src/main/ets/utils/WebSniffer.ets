@@ -432,7 +432,7 @@ class WebSnifferImpl {
       'for(var i=0;i<r.snapshotLength;i++)o.push(r.snapshotItem(i));}catch(e){}' +
       'if(o.length)break;}return o;}' +
       'function nmOf(el){var t=el?(String(el.textContent||"").trim()):"";' +
-      'var a=el&&el.getAttribute?String(el.getAttribute("title")||"").trim():"";' +
+      'var a=el&&el.getAttribute?String(el.getAttribute("title")||el.getAttribute("alt")||"").trim():"";' +
       'return a.length>t.length?a:t;}' +
       // 懒加载站点把真图放 data-src/data-original，src 常是有效但纯色的占位图
       // （onError 不触发，界面就一直黑框）。先跳过占位图取真地址，全是占位再兜第一个。
@@ -443,9 +443,11 @@ class WebSnifferImpl {
       'for(k=0;k<c.length;k++){v=String(c[k]||"").trim();if(v)return v;}return "";}' +
       'var rows=q(' + JSON.stringify(list) + ',null,true);var out=[];' +
       'for(var i=0;i<rows.length;i++){' +
-      'var nm=q(' + JSON.stringify(name) + ',rows[i],false)[0];' +
+      // 名字的 XPath 常常写成联合（.//h3|.//img），命中的第一个节点可能没有文字
+      // （比如 alt 为空的懒加载 img 排在标题前面），所以取第一个「有文字」的候选。
+      'var nms=q(' + JSON.stringify(name) + ',rows[i],false);var n="";' +
+      'for(var ni=0;ni<nms.length;ni++){var cd=nmOf(nms[ni]);if(cd){n=cd;break;}}' +
       'var a=q(' + JSON.stringify(href) + ',rows[i],false)[0];' +
-      'var n=nmOf(nm);' +
       'var u=a?String(a.getAttribute("href")||""):"";' +
       'if(u&&u.indexOf("//")===0)u=location.protocol+u;' +
       'else if(u&&u.charAt(0)==="/")u=location.origin+u;' +

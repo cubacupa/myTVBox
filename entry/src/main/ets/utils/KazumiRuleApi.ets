@@ -62,6 +62,8 @@ export interface KazumiRule {
   searchList: string;
   searchName: string;
   searchResult: string;
+  /** 可选：搜索结果里的海报 XPath（官方规则没有，网页站多半需要） */
+  searchPic: string;
   chapterRoads: string;
   chapterResult: string;
   // ---- nested 格式（milimili / sorani / xfdmnext 这类）：剧集只给播放页 id ----
@@ -238,6 +240,7 @@ export function parseKazumiRule(text: string): KazumiRule | null {
     searchList: J.str(root, 'searchList', ''),
     searchName: J.str(root, 'searchName', ''),
     searchResult: J.str(root, 'searchResult', ''),
+    searchPic: J.str(root, 'searchPic', ''),
     chapterRoads: J.str(root, 'chapterRoads', ''),
     chapterResult: J.str(root, 'chapterResult', ''),
     chapterApi: cc === null ? null : reqOf(cc['request']),
@@ -1107,13 +1110,14 @@ export class KazumiRuleApi {
    */
   private static async searchXPath(r: KazumiRule, wd: string): Promise<KazumiListResult> {
     const url: string = r.searchURL.split('@keyword').join(encodeURIComponent(wd));
-    const rows = await sniffer.xpathRows(url, r.searchList, r.searchName, r.searchResult, 14000);
+    const rows = await sniffer.xpathRows(url, r.searchList, r.searchName, r.searchResult, 14000,
+      r.searchPic);
     const items: VodItem[] = [];
     for (const row of rows) {
       const item: VodItem = {
         vod_id: row.href,
         vod_name: row.name,
-        vod_pic: '',
+        vod_pic: row.pic ?? '',
         site_key: r.name,
         type_name: categoryName(r.category)
       };
