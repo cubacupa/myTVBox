@@ -87,20 +87,10 @@ export struct About {
   @Builder
   hero() {
     Row({ space: 20 }) {
-      Stack() {
-        Row()
-          .width(72)
-          .height(72)
-          .borderRadius(22)
-          .backgroundColor(C_ACCENT)
-          .shadow({ radius: 30, color: '#59FF8A3D', offsetX: 0, offsetY: 10 })
-        SymbolGlyph($r('sys.symbol.play_fill'))
-          .fontSize(32)
-          .fontColor(['#150A04'])
-          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-      }
-      .width(72)
-      .height(72)
+      Image($r('app.media.foreground'))
+        .width(96)
+        .height(96)
+        .objectFit(ImageFit.Contain)
 
       Column({ space: 8 }) {
         Text('影视盒')
@@ -110,6 +100,9 @@ export struct About {
         Text('电视端的点播 + 直播聚合壳：自己配源，自己看片')
           .fontSize(13.5)
           .fontColor(C_SUB)
+        Text('作者：cubacupa（库巴）')
+          .fontSize(11.5)
+          .fontColor(C_DIM)
         Row({ space: 8 }) {
           Text(this.ver.length > 0 ? 'v' + this.ver : '')
             .fontSize(11.5)
