@@ -134,6 +134,8 @@ struct Index {
   @State sortMode: string = SORT_NEW;
   /** 排序方向：false = 降序（默认），true = 升序 */
   @State sortAsc: boolean = false;
+  /** 海报墙滚动条：切换排序/方向后回顶部 */
+  private gridScroller: Scroller = new Scroller();
   /** 已收进 Default 的站点 api（规范化后），顶栏按钮和站点浮层都读它 */
   @State myApis: string[] = [];
   /** 每次收集/移出自增，用来强制站点浮层的 ForEach 重建（key 里带上） */
@@ -782,6 +784,7 @@ struct Index {
     this.sortMode = mode;
     AppStorage.setOrCreate(SORT_KEY, mode);
     this.items = this.withSort(this.raw);
+    this.gridScroller.scrollToIndex(0);
     if (mode === SORT_SCORE) {
       this.sortDirty = true;
       this.startSortPoll();
@@ -794,6 +797,7 @@ struct Index {
     this.sortAsc = !this.sortAsc;
     AppStorage.setOrCreate(SORT_ASC_KEY, this.sortAsc);
     this.items = this.withSort(this.raw);
+    this.gridScroller.scrollToIndex(0);
   }
 
   private onScoreTick(): void {
@@ -1447,19 +1451,20 @@ struct Index {
 
   /** 排序 / 方向 / 解锁这一排小胶囊 */
   @Builder
-  miniPill(id: string, label: string, on: boolean, accent: boolean) {
+  miniPill(id: string, label: string, accent: boolean) {
+    // @Builder 参数按值传递，on 不能从外面传（状态变了不刷新）；在这里按 id 读实时状态
     Row() {
       Text(label)
         .fontSize(13)
-        .fontWeight(on ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(on ? (accent ? '#150A04' : '#FFB37A') : '#9C9CA8')
+        .fontWeight(this.pillOn(id) ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.pillOn(id) ? (accent ? '#150A04' : '#FFB37A') : '#9C9CA8')
     }
     .height(32)
     .padding({ left: 14, right: 14 })
     .borderRadius(11)
-    .backgroundColor(on ? (accent ? '#FF8A3D' : '#22FF8A3D')
+    .backgroundColor(this.pillOn(id) ? (accent ? '#FF8A3D' : '#22FF8A3D')
       : (this.hot(id) ? '#1AFFFFFF' : '#0DFFFFFF'))
-    .border({ width: 1, color: on ? Color.Transparent : (this.hot(id) ? '#2EFFFFFF' : Color.Transparent) })
+    .border({ width: 1, color: this.pillOn(id) ? Color.Transparent : (this.hot(id) ? '#2EFFFFFF' : Color.Transparent) })
     .focusable(true)
     .onFocus(() => { this.focusId = id; })
     .onBlur(() => { this.clearHot(id); })
@@ -1496,6 +1501,17 @@ struct Index {
     .onBlur(() => { this.clearHot('lock'); })
     .onHover((isHover: boolean) => { this.hoverId = isHover ? 'lock' : ''; })
     .onClick(() => { this.onPill('lock'); })
+  }
+
+  /** 胶囊的选中态：排序维度在这里实时读，按值传参不会随 @State 刷新 */
+  private pillOn(id: string): boolean {
+    if (id === 's-new') {
+      return this.sortMode === SORT_NEW;
+    }
+    if (id === 's-score') {
+      return this.sortMode === SORT_SCORE;
+    }
+    return false;
   }
 
   private onPill(id: string): void {
@@ -1576,9 +1592,9 @@ struct Index {
 
         // 排序：采集站 API 不认 order 参数，能真正改变结果的只有两个维度 + 一个方向
         Row({ space: 7 }) {
-          this.miniPill('s-dir', this.sortAsc ? '升序 ↑' : '降序 ↓', false, false)
-          this.miniPill('s-new', '最新', this.sortMode === SORT_NEW, true)
-          this.miniPill('s-score', '评分', this.sortMode === SORT_SCORE, true)
+          this.miniPill('s-dir', this.sortAsc ? '升序 ↑' : '降序 ↓', false)
+          this.miniPill('s-new', '最新', true)
+          this.miniPill('s-score', '评分', true)
         }
         .margin({ left: 12 })
 
@@ -1694,7 +1710,7 @@ struct Index {
             .width('100%')
             .padding({ left: 44, top: 8 })
         }
-        Grid() {
+        Grid(this.gridScroller) {
           ForEach(this.items, (item: VodItem) => {
             GridItem() {
               PosterCard({
