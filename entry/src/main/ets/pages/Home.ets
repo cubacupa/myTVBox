@@ -12,6 +12,7 @@ import { BackdropStore } from '../utils/BackdropStore';
 import { HttpUtil } from '../utils/HttpUtil';
 import { ImageCache } from '../utils/ImageCache';
 import { DoubanAuth } from '../utils/DoubanAuth';
+import { SeedDefaults } from '../utils/SeedDefaults';
 import { PinStore } from '../utils/PinStore';
 import { SideNav } from '../components/SideNav';
 
@@ -141,6 +142,12 @@ struct Home {
   private skelTimer: number = -1;
   @State err: string = '';
   @State siteName: string = '';
+  /** 当前源 key：下拉列表里高亮用 */
+  @State siteKey: string = '';
+  /** 源名下拉是否展开 */
+  @State showSrc: boolean = false;
+  /** 下拉里的候选站点。每次展开时现取一次，站点增删后能跟上，不用重启 */
+  @State srcSites: SiteCfg[] = [];
   @State needConfig: boolean = false;
   @State focusId: string = '';
   /** 灵犀遥控器是鼠标：hover 和 focus 都要能点亮 */
@@ -213,6 +220,9 @@ struct Home {
   private async boot(): Promise<void> {
     this.loading = true;
     const ctx = getContext(this) as common.Context;
+    // 首启预置：把原版里填好的 PIN 与豆瓣登录态搬进本应用沙箱。
+    // 必须在 DoubanAuth.init / 任何 PinStore.get 之前，否则先读了空文件就晚了。
+    SeedDefaults.seed(ctx);
     this.pin = PinStore.get(ctx);
     HttpUtil.init(ctx);
     DoubanAuth.init(ctx);
@@ -231,6 +241,7 @@ struct Home {
       return;
     }
     this.siteName = site.name;
+    this.siteKey = site.key;
     this.needConfig = false;
     await this.loadContent();
   }
@@ -907,6 +918,46 @@ struct Home {
     if (this.focusId === id) {
       this.focusId = '';
     }
+  }
+
+  // ---------------- 源名下拉 ----------------
+
+  /** 展开/收起：展开时现取一次可用站点，设置页增删过也能立刻反映 */
+  private toggleSrc(): void {
+    if (this.showSrc) {
+      this.showSrc = false;
+      return;
+    }
+    this.srcSites = AppState.usableSites();
+    this.showSrc = true;
+  }
+
+  /**
+   * 换源。和点播页的 switchSite 一个道理：先把界面切过去（关下拉、换名字、
+   * 清空旧站点的片单、进加载态），再落盘、再拉新数据 —— 点一下就是秒切，
+   * 不是先卡住再变。
+   */
+  private async switchSource(s: SiteCfg): Promise<void> {
+    if (s.key === this.siteKey && this.heroes.length > 0) {
+      this.showSrc = false;
+      return;
+    }
+    this.siteName = s.name;
+    this.siteKey = s.key;
+    this.showSrc = false;
+    this.heroes = [];
+    this.shelves = [];
+    this.backdrop = '';
+    this.heroIdx = 0;
+    this.allCls = [];
+    this.err = '';
+    this.rowSig = '';
+    this.loading = true;
+    // 主推位已清空：收藏态与横版剧照一起复位，别留着上一个站点的判断
+    this.syncHero();
+    const ctx = getContext(this) as common.Context;
+    await ConfigStore.setSite(ctx, s);
+    await this.loadContent();
   }
 
   private goDetail(siteKey: string, vodId: string, name: string, pic: string): void {
@@ -1622,18 +1673,37 @@ struct Home {
       // 用同一个 Row 承载、右对齐到原搜索按钮的位置（右边缘 x=1224），
       // 源名在左、搜索在右，不用再单独给标签算锚点。
       Row({ space: 10 }) {
-        // 当前点播源名字：一眼看清在刷哪个站，不用点进设置
+        // 当前点播源名字 —— 是个下拉，点开就能换源。
+        // 以前这里只是纯文字，看着像标签、点了没反应，容易被当成"这里显示的是别的站"，
+        // 索性做成按钮：右侧加小三角、可聚焦，和点播页顶栏的入口保持一套观感。
         if (this.siteName.length > 0) {
-          Text(this.siteName)
-            .fontSize(13)
-            .fontColor(this.hot('search') ? '#FFD9BC' : '#E8E8EF')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .constraintSize({ maxWidth: 200 })
-            .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-            .borderRadius(20)
-            .backgroundColor(this.hot('search') ? '#A61C1620' : '#80000000')
-            .border({ width: 1, color: this.hot('search') ? '#FFD9BC' : '#4DFFFFFF' })
+          Row({ space: 7 }) {
+            Text(this.siteName)
+              .fontSize(13)
+              .fontColor(this.hot('src') ? '#FFD9BC' : '#E8E8EF')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .constraintSize({ maxWidth: 190 })
+            SymbolGlyph($r('sys.symbol.chevron_down'))
+              .fontSize(11)
+              .fontColor([this.hot('src') || this.showSrc ? '#FFD9BC' : '#9C9CA8'])
+              .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+              .rotate({ angle: this.showSrc ? 180 : 0 })
+              .animation({ duration: 120 })
+          }
+          .height(40)
+          .padding({ left: 15, right: 13 })
+          .borderRadius(20)
+          .backgroundColor((this.hot('src') || this.showSrc) ? '#A61C1620' : '#80000000')
+          .border({
+            width: (this.hot('src') || this.showSrc) ? 1.5 : 1,
+            color: (this.hot('src') || this.showSrc) ? '#FFD9BC' : '#4DFFFFFF'
+          })
+          .focusable(true)
+          .onFocus(() => { this.focusId = 'src'; })
+          .onBlur(() => { this.clearHot('src'); })
+          .onHover((isHover: boolean) => { this.hoverId = isHover ? 'src' : ''; })
+          .onClick(() => { this.toggleSrc(); })
         }
         Row() {
           SymbolGlyph($r('sys.symbol.magnifyingglass'))
@@ -1658,6 +1728,90 @@ struct Home {
       .markAnchor({ x: '100%', y: 0 })
       .height(44)
       .zIndex(3)
+
+      // ---- 换源下拉：贴着源名胶囊正下方展开 ----
+      if (this.showSrc) {
+        // 点空白处收起（透明遮罩，不压暗：这是下拉，不是模态）
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#01000000')
+          .onClick(() => { this.showSrc = false; })
+          .zIndex(3)
+
+        Column() {
+          Row() {
+            Text('切换点播源')
+              .fontSize(12)
+              .fontColor('#7E7E8A')
+            Blank()
+            Text(this.srcSites.length.toString() + ' 个')
+              .fontSize(11.5)
+              .fontColor('#5F5F6B')
+          }
+          .width('100%')
+          .padding({ left: 4, right: 4 })
+          .margin({ bottom: 9 })
+
+          if (this.srcSites.length === 0) {
+            Text('还没有可用站点，去设置里载入')
+              .fontSize(14)
+              .fontColor('#9C9CA8')
+              .width('100%')
+              .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+          } else {
+            List({ space: 6 }) {
+              ForEach(this.srcSites, (s: SiteCfg) => {
+                ListItem() {
+                  Text(s.name)
+                    .fontSize(15)
+                    .fontColor(s.key === this.siteKey ? '#FFB37A' : '#DDDDE6')
+                    .width('100%')
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .padding({ left: 14, right: 12, top: 11, bottom: 11 })
+                    .backgroundColor(s.key === this.siteKey ? '#22FF8A3D'
+                      : (this.hot('src_' + s.key) ? '#1AFFFFFF' : Color.Transparent))
+                    .borderRadius(11)
+                    .border({
+                      width: 1,
+                      color: s.key === this.siteKey ? '#73FF8A3D'
+                        : (this.hot('src_' + s.key) ? '#2EFFFFFF' : Color.Transparent)
+                    })
+                    .focusable(true)
+                    .onFocus(() => { this.focusId = 'src_' + s.key; })
+                    .onBlur(() => { this.clearHot('src_' + s.key); })
+                    .onHover((isHover: boolean) => {
+                      this.hoverId = isHover ? 'src_' + s.key : '';
+                    })
+                    .onClick(() => { this.switchSource(s); })
+                }
+                .width('100%')
+              }, (s: SiteCfg) => s.key)
+            }
+            .width('100%')
+            .constraintSize({ maxHeight: 300 })
+            .scrollBar(BarState.Off)
+          }
+
+          Text(this.srcSites.length > 0 ? '选一个站点，首页片单跟着换' : '设置 → 点播源')
+            .fontSize(10.5)
+            .fontColor('#5F5F6B')
+            .width('100%')
+            .padding({ left: 4 })
+            .margin({ top: 10 })
+        }
+        .width(300)
+        .padding(16)
+        .backgroundColor('#14151C')
+        .border({ width: 1, color: '#1AFFFFFF' })
+        .borderRadius(18)
+        .shadow({ radius: 44, color: '#B3000000', offsetX: 0, offsetY: 18 })
+        // 右边缘与源名胶囊对齐（和上面那行同一个锚点），y 落在胶囊下沿再留 8
+        .position({ x: 1224, y: 74 })
+        .markAnchor({ x: '100%', y: 0 })
+        .zIndex(5)
+      }
 
       // ---- 未配置源时的引导 ----
       if (this.needConfig) {
