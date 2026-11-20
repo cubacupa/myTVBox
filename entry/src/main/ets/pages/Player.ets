@@ -11,6 +11,7 @@ import { PosterStore } from '../utils/PosterStore';
 import { RatingStore } from '../utils/RatingStore';
 import { LiveMarkStore } from '../utils/LiveMarkStore';
 import { LocalPrefetch } from '../utils/LocalPrefetch';
+import { MkvTracks, MkvTrack } from '../utils/MkvTracks';
 import { AppState } from '../utils/AppState';
 import { SniffWeb } from '../components/SniffWeb';
 import { sniffer } from '../utils/WebSniffer';
@@ -70,6 +71,19 @@ interface PlayerParams {
 }
 
 /**
+ * 一条可选轨道（来自 AVPlayer.getTrackDescription）。
+ * MKV 这类容器里常有多条字幕 / 多条音轨，控制条上要能挑。
+ */
+interface TrackItem {
+  /** 播放器内部的轨道号，selectTrack / deselectTrack 都用它 */
+  idx: number;
+  /** 菜单里显示的名字：优先 track_name（如「国语」「简体」），否则按语言码/序号兜底 */
+  label: string;
+  /** 副行信息：语言 + 编码，如「chi · application/x-subrip」 */
+  detail: string;
+}
+
+/**
  * 播放页：支持点播 / 直播。
  *
  * 交互（本机遥控器是「指向式」air mouse：方向键被系统转成光标移动，OK 转成鼠标点击，
@@ -112,6 +126,24 @@ struct Player {
   @State uiVisible: boolean = true;
   /** 快进快退、倍速这类操作的即时提示，独立于控制层 */
   @State tipText: string = '';
+  /** 当前这条字幕（来自引擎的 subtitleUpdate，内置字幕轨也走这里）；空串 = 不显示 */
+  @State subText: string = '';
+  /** 字幕自动消失的定时器（引擎空档不推空串，靠 duration 自己清） */
+  private subTimer: number = -1;
+  /** 片源里的字幕轨（MKV 内置轨）；空 = 没有可选项，控制条不画字幕按钮 */
+  @State subTracks: TrackItem[] = [];
+  /** 片源里的音轨；空 = 单音轨，菜单不出「音轨」段 */
+  @State audTracks: TrackItem[] = [];
+  /** 当前选中的字幕轨号；-1 = 字幕关闭 */
+  @State curSub: number = -1;
+  /** 当前选中的音轨号；-1 = 未知（引擎自己选的，没问出来） */
+  @State curAud: number = -1;
+  /** 字幕/音轨选择菜单是否展开 */
+  @State menuOn: boolean = false;
+  /** 展开的是哪一栏：'sub' 字幕 / 'aud' 音轨。两个按钮各开各的，不再互相顶替 */
+  @State menuMode: string = '';
+  /** 菜单里光标悬停的行（用轨道号 + 类型拼的 key），用于高亮 */
+  @State menuHover: string = '';
   /** 长按快进退的居中大提示：主行目标时间、副行偏移量；独立于 tipText 与控制层 */
   @State seekPreviewOn: boolean = false;
   @State seekPreviewMain: string = '';
@@ -374,6 +406,8 @@ struct Player {
     try {
       // 换线路会重建播放器：用代次号让旧实例的异步回调全部失效
       this.gen++;
+      // 换集/换线路后旧字幕不能留在屏上，等新实例的 subtitleUpdate 重新推
+      this.subText = '';
       const g: number = this.gen;
       const p: media.AVPlayer = await media.createAVPlayer();
       if (g !== this.gen) {
@@ -400,6 +434,8 @@ struct Player {
             this.durTime = 0;
           }
           this.applyScaleMode();
+          // 轨道表只有在 prepared 之后才拿得到（提前调报 5400102）
+          this.loadTracks(p, g);
           this.tryPlay();
         } else if (state === 'playing') {
           this.errMsg = '';
@@ -428,6 +464,39 @@ struct Player {
           return;
         }
         this.onPlayFail(url, err.message, String(err.code));
+      });
+      // 字幕：引擎对**内置**字幕轨也会抛 subtitleUpdate（设备日志里一直刷
+      // "can not find Subtitle callback"，就是这个事件没人接）。接住后自己画在画面底部，
+      // 不走 addSubtitleFromUrl —— 那是给外挂 srt 用的，我们播的是本地 fd。
+      p.on('subtitleUpdate', (info: media.SubtitleInfo) => {
+        if (g !== this.gen) {
+          return;
+        }
+        const t: string = info.text ?? '';
+        hilog.info(DOMAIN, TAG, 'subtitle %{public}dms: %{public}s', info.startTime ?? 0,
+          t.length > 60 ? t.substring(0, 60) : t);
+        // 用户在菜单里关掉字幕后，引擎可能仍在推这条轨（部分机型 deselect 无效），
+        // 这里直接丢弃，保证界面上真的不显示
+        if (this.curSub < 0) {
+          this.subText = '';
+          return;
+        }
+        // 引擎只在有台词时推事件，**空档不推空串**，所以必须按 duration 自己清，
+        // 否则上一句会一直挂在画面上
+        if (this.subTimer >= 0) {
+          clearTimeout(this.subTimer);
+          this.subTimer = -1;
+        }
+        this.subText = t;
+        const hold: number = info.duration ?? 0;
+        if (hold > 0) {
+          this.subTimer = setTimeout(() => {
+            if (g === this.gen) {
+              this.subText = '';
+              this.subTimer = -1;
+            }
+          }, hold);
+        }
       });
       // 缓冲诊断：区分「网络断档」和「解码慢」，并在频繁缓冲时提示换线路
       this.player.on('bufferingUpdate', (type: media.BufferingInfoType, value: number) => {
@@ -544,6 +613,348 @@ struct Player {
       this.errMsg = '初始化播放器失败：' + (e as Error).message + '\n地址：' + url;
       hilog.error(DOMAIN, TAG, 'init failed: %{public}s', (e as Error).message);
     }
+  }
+
+  // ---------------- 内置字幕 / 音轨 ----------------
+
+  /**
+   * 读取片源里的字幕轨与音轨。
+   *
+   * 只有 prepared 之后 getTrackDescription 才能调（提前调报 5400102），
+   * 而且它一次返回全部轨道（视频/音频/字幕混在一起），必须靠 track_type 分流。
+   * 菜单回传给 selectTrack 的必须是引擎给的 track_index，不能拿数组下标顶替：
+   * MKV 里视频轨占 0，字幕轨往往是 2、3 这种跳号。
+   */
+  private async loadTracks(p: media.AVPlayer, g: number): Promise<void> {
+    let desc: media.MediaDescription[] = [];
+    try {
+      desc = await p.getTrackDescription();
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'getTrackDescription failed: %{public}s', (e as Error).message);
+      return;
+    }
+    if (g !== this.gen) {
+      return;
+    }
+    // 引擎对 MKV 不返回轨道名和语言（6 条字幕全叫 "subtitle"、lang 为空），
+    // 只能自己读文件头的 Tracks。本地预取过才有文件，没有就退回按序号显示。
+    let meta: MkvTrack[] = [];
+    if (this.localPath.length > 0) {
+      meta = MkvTracks.read(this.localPath);
+    }
+    const subs: TrackItem[] = [];
+    const auds: TrackItem[] = [];
+    for (let i = 0; i < desc.length; i++) {
+      const d: media.MediaDescription = desc[i];
+      const rawType: Object = d['track_type'];
+      const type: number = typeof rawType === 'number' ? rawType as number : -1;
+      const isSub: boolean = type === media.MediaType.MEDIA_TYPE_SUBTITLE;
+      if (!isSub && type !== media.MediaType.MEDIA_TYPE_AUD) {
+        continue;
+      }
+      const rawIdx: Object = d['track_index'];
+      const idx: number = typeof rawIdx === 'number' ? rawIdx as number : -1;
+      if (idx < 0) {
+        continue;
+      }
+      const rawName: Object = d['track_name'];
+      const name: string = typeof rawName === 'string' ? rawName as string : '';
+      const rawLang: Object = d['language'];
+      const lang: string = typeof rawLang === 'string' ? rawLang as string : '';
+      const rawMime: Object = d['codec_mime'];
+      const mime: string = typeof rawMime === 'string' ? rawMime as string : '';
+      // 引擎的 track_index 与 MKV 的 TrackNumber 差 1（实测音轨 1/2 → 2/3，字幕 3..8 → 4..9）
+      const mkv: MkvTrack | null = this.matchMkv(meta, idx + 1);
+      const tName: string = mkv !== null && mkv.name.length > 0 ? mkv.name : name;
+      const tLang: string = mkv !== null
+        ? (mkv.langIetf.length > 0 ? mkv.langIetf : mkv.lang) : lang;
+      const tCodec: string = mkv !== null && mkv.codec.length > 0 ? mkv.codec : mime;
+      const seq: number = (isSub ? subs.length : auds.length) + 1;
+      hilog.info(DOMAIN, TAG, 'track idx=%{public}d type=%{public}d name=[%{public}s] lang=[%{public}s] mkv=%{public}d',
+        idx, type, tName, tLang, mkv !== null ? mkv.num : -1);
+      const it: TrackItem = {
+        idx: idx,
+        label: this.trackLabel(isSub, tName, tLang, seq),
+        detail: this.codecShort(tCodec)
+      };
+      if (isSub) {
+        subs.push(it);
+      } else {
+        auds.push(it);
+      }
+    }
+    // 引擎自己选中了哪几条：问不出来（老机型 / 单轨）就按第一条兜底
+    let sel: number[] = [];
+    try {
+      sel = await p.getSelectedTracks();
+    } catch (e) {
+      sel = [];
+    }
+    if (g !== this.gen) {
+      return;
+    }
+    this.subTracks = subs;
+    this.audTracks = auds;
+    this.curSub = -1;
+    this.curAud = -1;
+    for (let i = 0; i < sel.length; i++) {
+      for (let j = 0; j < subs.length; j++) {
+        if (subs[j].idx === sel[i]) {
+          this.curSub = sel[i];
+        }
+      }
+      for (let k = 0; k < auds.length; k++) {
+        if (auds[k].idx === sel[i]) {
+          this.curAud = sel[i];
+        }
+      }
+    }
+    if (this.curSub < 0 && subs.length > 0) {
+      this.curSub = subs[0].idx;
+    }
+    if (this.curAud < 0 && auds.length > 0) {
+      this.curAud = auds[0].idx;
+    }
+    hilog.info(DOMAIN, TAG, 'tracks: %{public}d sub / %{public}d aud, cur=%{public}d/%{public}d',
+      subs.length, auds.length, this.curSub, this.curAud);
+  }
+
+  /** 在 MKV 头里按 TrackNumber 找对应轨道；没解析到就返回 null */
+  private matchMkv(meta: MkvTrack[], num: number): MkvTrack | null {
+    for (let i = 0; i < meta.length; i++) {
+      if (meta[i].num === num) {
+        return meta[i];
+      }
+    }
+    return null;
+  }
+
+  /** 轨道名是不是「没有信息量」的通用词（这种名字不能直接显示） */
+  private isGenericName(name: string): boolean {
+    const s: string = name.trim().toLowerCase();
+    return s.length === 0 || s === 'subtitle' || s === 'subtitles' || s === 'sub'
+      || s === 'text' || s === 'srt' || s === 'ass' || s === '字幕'
+      || s === 'audio' || s === 'sound' || s === 'track' || s === '音轨';
+  }
+
+  /**
+   * 菜单里那一行写什么。
+   * 顺序：MKV 里写的中文名（Simplified/Hong Kong…）→ 语言 → 序号。
+   * 序号是最后的兜底：至少让「有 6 条、选第几条」这件事可操作。
+   */
+  private trackLabel(isSub: boolean, name: string, lang: string, seq: number): string {
+    const cn: string = this.nameCn(name);
+    if (cn.length > 0) {
+      return cn;
+    }
+    if (!this.isGenericName(name)) {
+      return name;
+    }
+    const lg: string = this.langName(lang);
+    if (lg.length > 0) {
+      return lg;
+    }
+    return (isSub ? '字幕 ' : '音轨 ') + seq;
+  }
+
+  /** MKV 轨道名常见写法 → 中文；认不出来返回空串，交给语言信息 */
+  private nameCn(name: string): string {
+    const s: string = name.trim().toLowerCase();
+    if (s === 'simplified' || s === 'chs' || s === '简体' || s === '简体中文') {
+      return '简体中文';
+    }
+    if (s === 'traditional' || s === 'cht' || s === '繁体' || s === '繁体中文') {
+      return '繁体中文';
+    }
+    if (s === 'hong kong' || s === 'hongkong' || s === 'hk' || s === 'cantonese'
+      || s === '粤语' || s === '广东话') {
+      return '香港中文';
+    }
+    if (s === 'sdh' || s === 'cc' || s === '听障' || s === '听障字幕') {
+      return '听障字幕';
+    }
+    if (s === 'forced' || s === '强制') {
+      return '强制字幕';
+    }
+    if (s === 'chinese' || s === '中文') {
+      return '中文';
+    }
+    if (s === 'english' || s === '英文') {
+      return '英语';
+    }
+    return '';
+  }
+
+  private langName(code: string): string {
+    const c: string = code.trim().toLowerCase();
+    if (c === 'zh' || c === 'chi' || c === 'zho' || c === 'chs' || c === 'cht'
+      || c === 'cmn' || c === 'zh-cn' || c === 'zh-hans') {
+      return '中文';
+    }
+    if (c === 'yue' || c === 'zh-hk' || c === 'zh-tw') {
+      return '广东话';
+    }
+    if (c === 'en' || c === 'eng') {
+      return '英语';
+    }
+    if (c === 'ja' || c === 'jpn') {
+      return '日语';
+    }
+    if (c === 'ko' || c === 'kor') {
+      return '韩语';
+    }
+    if (c === 'und' || c === 'undetermined') {
+      return '';
+    }
+    return code;
+  }
+
+  /** 编码缩到菜单能放下的几个字：S_TEXT/UTF8 → SRT，A_EAC3 → E-AC3 */
+  private codecShort(codec: string): string {
+    const s: string = codec.trim();
+    if (s === 'S_TEXT/UTF8' || s === 'S_TEXT/SRT') {
+      return 'SRT';
+    }
+    if (s === 'S_TEXT/ASS') {
+      return 'ASS';
+    }
+    if (s === 'S_TEXT/SSA') {
+      return 'SSA';
+    }
+    if (s === 'S_HDMV/PGS') {
+      return 'PGS';
+    }
+    if (s === 'S_VOBSUB') {
+      return 'VOBSUB';
+    }
+    if (s === 'A_EAC3') {
+      return 'E-AC3';
+    }
+    if (s === 'A_AC3') {
+      return 'AC3';
+    }
+    if (s === 'A_AAC') {
+      return 'AAC';
+    }
+    if (s === 'A_DTS') {
+      return 'DTS';
+    }
+    if (s === 'A_TRUEHD') {
+      return 'TrueHD';
+    }
+    if (s === 'A_FLAC') {
+      return 'FLAC';
+    }
+    let t: string = s;
+    const cut: number = t.indexOf('/');
+    if (cut >= 0) {
+      t = t.substring(cut + 1);
+    }
+    if (t.startsWith('x-')) {
+      t = t.substring(2);
+    }
+    return t.toUpperCase();
+  }
+
+  /** 有字幕轨才画「字幕」按钮 */
+  private hasSubs(): boolean {
+    return this.subTracks.length > 0;
+  }
+
+  /** 音轨要多于一条才值得画「音轨」按钮（单音轨没得选） */
+  private hasAuds(): boolean {
+    return this.audTracks.length > 1;
+  }
+
+  private hasTracks(): boolean {
+    return this.hasSubs() || this.hasAuds();
+  }
+
+  private toggleMenu(mode: string): void {
+    if (mode === 'sub' && !this.hasSubs()) {
+      return;
+    }
+    if (mode === 'aud' && !this.hasAuds()) {
+      return;
+    }
+    if (this.menuOn && this.menuMode === mode) {
+      this.menuOn = false;
+      this.menuHover = '';
+      this.scheduleHide();
+      return;
+    }
+    this.menuMode = mode;
+    this.menuOn = true;
+    this.menuHover = '';
+    // 菜单开着时不能让控制条按 5 秒自动隐藏，否则点一半就没了
+    this.clearHide();
+    this.uiVisible = true;
+  }
+
+  private closeMenu(): void {
+    this.menuOn = false;
+    this.menuHover = '';
+    this.scheduleHide();
+  }
+
+  /**
+   * 菜单里点了一行。idx = -1 只对字幕有意义，表示「关闭字幕」。
+   *
+   * 关字幕不依赖引擎的 deselectTrack：部分机型对内置字幕轨不支持取消，
+   * 所以除了尽力 deselect，还会把 curSub 置 -1 —— subtitleUpdate 那里会直接丢弃，
+   * 界面上的字幕一定消失。
+   */
+  private pickTrack(isSub: boolean, idx: number, label: string): void {
+    this.lastBtnTapTs = Date.now();
+    this.menuOn = false;
+    this.menuMode = '';
+    const p = this.player;
+    if (!p) {
+      return;
+    }
+    if (isSub && idx < 0) {
+      // 「关闭字幕」只做软件层关闭，**不调 deselectTrack**：
+      // 实测 deselect 之后引擎就把这条轨彻底丢了，再 selectTrack 同一轨也不会
+      // 恢复推送（画面从此永远没有字幕），而且不支持的轨道上 deselectTrack 是
+      // 同步抛错、会直接把播放页打崩。
+      // 文本轨解码开销可以忽略，字幕照常推过来、这里丢弃就行，开关都是即时的。
+      this.curSub = -1;
+      this.subText = '';
+      if (this.subTimer >= 0) {
+        clearTimeout(this.subTimer);
+        this.subTimer = -1;
+      }
+      this.showTip('字幕已关闭');
+      this.scheduleHide();
+      return;
+    }
+    let pr: Promise<void> | null = null;
+    try {
+      pr = p.selectTrack(idx);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'selectTrack %{public}d threw: %{public}s',
+        idx, (e as Error).message);
+      this.showTip('这条轨道切不过去');
+      return;
+    }
+    if (pr === null) {
+      return;
+    }
+    pr.then(() => {
+      if (isSub) {
+        this.curSub = idx;
+        this.subText = '';
+        this.showTip('字幕：' + label);
+      } else {
+        this.curAud = idx;
+        this.showTip('音轨：' + label);
+      }
+      this.scheduleHide();
+    }).catch((e: BusinessError) => {
+      hilog.error(DOMAIN, TAG, 'selectTrack %{public}d failed: %{public}s / %{public}d',
+        idx, e.message, e.code);
+      this.showTip('这条轨道切不过去（' + e.code + '）');
+    });
   }
 
   // ---------------- 直播多线路 ----------------
@@ -725,6 +1136,19 @@ struct Player {
     this.player = null;
     // 代次 +1：旧实例随后抛出的 stateChange / error 全部按过期丢弃
     this.gen++;
+    if (this.subTimer >= 0) {
+      clearTimeout(this.subTimer);
+      this.subTimer = -1;
+    }
+    this.subText = '';
+    // 换集/换线路后轨道表必须重读：新实例的 track_index 与上一集毫无关系
+    this.subTracks = [];
+    this.audTracks = [];
+    this.curSub = -1;
+    this.curAud = -1;
+    this.menuOn = false;
+    this.menuMode = '';
+    this.menuHover = '';
     if (p) {
       p.release().catch(() => {});
     }
@@ -963,6 +1387,10 @@ struct Player {
       this.scheduleHide();
     } else {
       this.clearHide();
+      // 控制层收起时菜单不能留在屏上（它不随 uiVisible 一起淡出）
+      this.menuOn = false;
+      this.menuMode = '';
+      this.menuHover = '';
       // 控制层藏起来后给出一次引导，否则用户不知道点哪里能唤回
       this.showTip('点屏幕任意位置可显示控制条');
     }
@@ -975,7 +1403,8 @@ struct Player {
     }
     this.uiTimer = setTimeout(() => {
       this.uiTimer = -1;
-      if (this.isPlaying) {
+      // 菜单开着时不自动收：用户正在挑镜头，收掉等于白点
+      if (this.isPlaying && !this.menuOn) {
         this.uiVisible = false;
       }
     }, UI_HIDE_MS) as number;
@@ -1328,6 +1757,11 @@ struct Player {
       return;
     }
     this.lastTapTs = now;
+    // 菜单开着时点空白：只收菜单，控制条留着（否则用户还得再点一次才能重新打开菜单）
+    if (this.menuOn) {
+      this.closeMenu();
+      return;
+    }
     this.toggleUi();
     // 点画面后把焦点收回按键接收器，避免焦点跑掉导致遥控器失效
     try {
@@ -1542,6 +1976,12 @@ struct Player {
     if (action === 'size') {
       return this.actualSize ? '⛶ 全屏' : '▣ 实际 100%';
     }
+    if (action === 'sub') {
+      return '字幕';
+    }
+    if (action === 'aud') {
+      return '音轨';
+    }
     return '退出';
   }
 
@@ -1567,6 +2007,10 @@ struct Player {
       this.togglePlay();
     } else if (action === 'speed') {
       this.changeSpeed(1);
+    } else if (action === 'sub') {
+      this.toggleMenu('sub');
+    } else if (action === 'aud') {
+      this.toggleMenu('aud');
     } else if (action === 'line') {
       this.switchLine();
     } else if (action === 'prev') {
@@ -1605,8 +2049,63 @@ struct Player {
       .hitTestBehavior(HitTestMode.None)
   }
 
+  private menuCheck(isSub: boolean, idx: number): string {
+    const cur: number = isSub ? this.curSub : this.curAud;
+    if (isSub && idx < 0) {
+      return cur < 0 ? '✓' : '';
+    }
+    return cur === idx ? '✓' : '';
+  }
+
+  /**
+   * 菜单里的一行轨道。
+   * label / detail 是固定的轨道信息，按值传没问题；「勾选」这件事依赖 this.curSub，
+   * 必须在 Builder 内部读状态，否则切完轨菜单里的勾不会动。
+   */
   @Builder
-  ctrlBtn(action: string) {
+  menuRow(isSub: boolean, idx: number, label: string, detail: string) {
+    Row() {
+      Text(this.menuCheck(isSub, idx))
+        .width(22)
+        .fontSize(16)
+        .fontColor('#FF8A3D')
+      Text(label)
+        .fontSize(16)
+        .fontColor('#ffffff')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+      if (detail.length > 0) {
+        Text(detail)
+          .fontSize(12)
+          .fontColor('#8a8a8a')
+          .margin({ left: 10 })
+      }
+    }
+    .width('100%')
+    .height(46)
+    .padding({ left: 10, right: 14 })
+    .borderRadius(8)
+    .backgroundColor(this.menuHover === ((isSub ? 's' : 'a') + idx) ? '#33FFFFFF' : '#00000000')
+    .onHover((isHover: boolean) => {
+      const k: string = (isSub ? 's' : 'a') + idx;
+      if (isHover) {
+        this.menuHover = k;
+      } else if (this.menuHover === k) {
+        this.menuHover = '';
+      }
+    })
+    .onClick(() => {
+      this.pickTrack(isSub, idx, label);
+    })
+    .onTouch((ev: TouchEvent) => {
+      // 拦住冒泡：否则点菜单会顺带把控制层收起
+      ev.stopPropagation();
+    })
+  }
+
+  @Builder
+  ctrlBtn(action: string, pad: number) {
     // 文字必须在 builder 内部读状态：@Builder 传参是按值传递，父状态变化不会重建，
     // 直接把 label 当参数传进来会一直显示旧的「▶ 播放」
     Button(this.btnLabel(action))
@@ -1615,7 +2114,7 @@ struct Player {
       // 光标指到哪个按钮就亮哪个
       .backgroundColor(this.hoverKey === action ? '#FF6B00' : '#66000000')
       .height(54)
-      .padding({ left: 26, right: 26 })
+      .padding({ left: pad, right: pad })
       .borderRadius(27)
       // 可见按钮不抢焦点：焦点统一由隐藏的「按键接收器」持有，
       // 否则方向键会被系统当成焦点导航，左右键就没法用来快进退
@@ -1816,18 +2315,27 @@ struct Player {
             // 组间留出更大的间距，遥控器光标扫过时不容易点错相邻的按钮。
             Row({ space: 18 }) {
               if (this.canSwitchEp()) {
-                this.ctrlBtn('prev')
-                this.ctrlBtn('next')
+                this.ctrlBtn('prev', 26)
+                this.ctrlBtn('next', 26)
                 this.gapBtn()
               }
-              this.ctrlBtn('back')
-              this.ctrlBtn('fwd')
+              this.ctrlBtn('back', 26)
+              this.ctrlBtn('fwd', 26)
               this.gapBtn()
-              this.ctrlBtn('toggle')
+              this.ctrlBtn('toggle', 26)
               this.gapBtn()
-              this.ctrlBtn('speed')
-              this.ctrlBtn('size')
-              this.ctrlBtn('exit')
+              this.ctrlBtn('speed', 26)
+              // 字幕、音轨各一个按钮，各开各的菜单。字幕轨存在就一定出现「字幕」，
+              // 不会再被音轨顶掉；音轨只有多条时才给（单音轨没得选）。
+              // 两个字按钮 padding 收窄，保证 9~10 个按钮也不换行。
+              if (this.hasSubs()) {
+                this.ctrlBtn('sub', 18)
+              }
+              if (this.hasAuds()) {
+                this.ctrlBtn('aud', 18)
+              }
+              this.ctrlBtn('size', 26)
+              this.ctrlBtn('exit', 26)
             }
             .margin({ top: 16 })
 
@@ -1837,12 +2345,12 @@ struct Player {
           .width('100%').padding(24).backgroundColor('#000000D9')
         } else {
           Row({ space: 18 }) {
-            this.ctrlBtn('toggle')
+            this.ctrlBtn('toggle', 26)
             if (this.lineCount > 1) {
-              this.ctrlBtn('line')
+              this.ctrlBtn('line', 26)
             }
-            this.ctrlBtn('size')
-            this.ctrlBtn('exit')
+            this.ctrlBtn('size', 26)
+            this.ctrlBtn('exit', 26)
           }
           .width('100%')
           .justifyContent(FlexAlign.Center)
@@ -1881,6 +2389,80 @@ struct Player {
         }
       })
 
+
+      // 字幕 / 音轨选择菜单：贴右下角、浮在控制条上方。
+      // 点哪个按钮就开哪一栏，标题跟着变，两栏不再挤在同一个菜单里。
+      // 外层铺满但 hitTestBehavior=None，点菜单外面能穿透到「点画面」那层，
+      // 由 onScreenTap 把菜单收起；菜单本体自己吃点击。
+      if (this.menuOn) {
+        Column() {
+          Column() {
+            Text(this.menuMode === 'aud' ? '音轨' : '字幕')
+              .fontSize(13).fontColor('#8a8a8a')
+              .width('100%')
+              .padding({ left: 14, top: 10, bottom: 4 })
+            Scroll() {
+              Column() {
+                if (this.menuMode === 'aud') {
+                  ForEach(this.audTracks, (t: TrackItem) => {
+                    this.menuRow(false, t.idx, t.label, t.detail)
+                  }, (t: TrackItem) => 'aud' + t.idx)
+                } else {
+                  this.menuRow(true, -1, '关闭字幕', '')
+                  ForEach(this.subTracks, (t: TrackItem) => {
+                    this.menuRow(true, t.idx, t.label, t.detail)
+                  }, (t: TrackItem) => 'sub' + t.idx)
+                }
+              }
+              .width('100%')
+              .padding({ left: 6, right: 6, top: 2, bottom: 8 })
+            }
+            .width('100%')
+            .constraintSize({ maxHeight: 480 })
+            .scrollBar(BarState.Auto)
+            .edgeEffect(EdgeEffect.None)
+          }
+          .width(400)
+          .backgroundColor('#E6000000')
+          .borderRadius(14)
+          .border({ width: 1, color: '#33FFFFFF' })
+          .clip(true)
+          .hitTestBehavior(HitTestMode.Default)
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.End)
+        .alignItems(HorizontalAlign.End)
+        .padding({ right: 40, bottom: 120 })
+        .hitTestBehavior(HitTestMode.None)
+      }
+
+      // 字幕层：贴着画面底部居中。控制条弹出时上移，避免被进度条压住。
+      // 不吃事件（hitTestBehavior None），点画面照样能唤出控制条。
+      if (this.subText.length > 0) {
+        Column() {
+          Text(this.subText)
+            .fontSize(32)
+            .fontColor('#FFFFFF')
+            .fontWeight(FontWeight.Medium)
+            .textAlign(TextAlign.Center)
+            .maxLines(3)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .lineHeight(44)
+            .padding({ left: 18, right: 18, top: 6, bottom: 8 })
+            .backgroundColor('#80000000')
+            .borderRadius(8)
+            .textShadow({ radius: 8, color: '#E6000000', offsetX: 0, offsetY: 2 })
+            .constraintSize({ maxWidth: '82%' })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.End)
+        .alignItems(HorizontalAlign.Center)
+        // 118vp：实测控制条按钮从 y=1841 起（2160 高），92vp 时字幕底边会压到按钮
+        .padding({ bottom: 118 })
+        .hitTestBehavior(HitTestMode.None)
+      }
 
       // 快进/倍速的即时反馈，控制栏隐藏时也能看到
       if (this.tipText.length > 0) {
@@ -2025,6 +2607,11 @@ struct Player {
       }
       if (code === KeyCode.KEYCODE_BACK) {
         if (down) {
+          // 菜单开着时返回键先收菜单，不要直接退出播放
+          if (this.menuOn) {
+            this.closeMenu();
+            return true;
+          }
           this.saveAndExit();
         }
         return true;
