@@ -1025,11 +1025,22 @@ export class KazumiRuleApi {
     const root: string = base.endsWith('/') ? base : base + '/';
     const limit: number = 30;
     const url: string = root + 'index.php/ajax/data?mid=1&limit=' + limit + '&page=' + page;
-    let data: CmsDataResp;
-    try {
-      data = await HttpUtil.getJsonWith<CmsDataResp>(url, root, CMS_UA);
-    } catch (e) {
-      // 关了接口的站会回首页 HTML / "closed"，不是 JSON 就在这儿退出
+    let data: CmsDataResp | null = null;
+    // 这类 macCMS 数据接口是现查库，dmbus.cc 实测 10~18 秒才回、偶尔直接超时。
+    // 默认 12 秒 readTimeout 必然掐断，退回空词搜索只剩 36 条。放宽到 45 秒并重试一次。
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        data = await HttpUtil.getJsonWithTimeout<CmsDataResp>(url, root, CMS_UA, 15000, 45000);
+        break;
+      } catch (e) {
+        // 关了接口的站会回首页 HTML / "closed"，不是 JSON 也在这儿退出（重试无意义）
+        const msg: string = (e as Error).message;
+        if (msg.indexOf('不是 JSON') >= 0 || msg.indexOf('返回内容为空') >= 0) {
+          return null;
+        }
+      }
+    }
+    if (data === null) {
       return null;
     }
     const rows: CmsDataItem[] = data.list ?? [];

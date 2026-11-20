@@ -685,6 +685,51 @@ export class HttpUtil {
   }
 
   /**
+   * 带自定义超时的文本请求。给慢站用：dmbus.cc 这类 macCMS 的 ajax/data 接口
+   * 服务端要现查库，实测 10~18 秒才回（偶尔 40 秒超时），默认 12 秒 readTimeout
+   * 必然掐断 → browseCms 返回 null → 掉到空词搜索兜底，全库 6301 部只剩 36 部。
+   */
+  static async getTextWithTimeout(url: string, referer: string, ua: string,
+    connectTimeout: number, readTimeout: number): Promise<string> {
+    const u: string = HttpUtil.clean(url);
+    if (u.length === 0) {
+      throw new Error('地址为空');
+    }
+    const host: string = HttpUtil.hostOf(u);
+    const ck: string = (host === 'douban.com' || host.endsWith('.douban.com'))
+      ? DoubanAuth.get() : '';
+    const header: Record<string, string> = {
+      'User-Agent': ua,
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+      'Referer': referer
+    };
+    if (ck.length > 0) {
+      header['Cookie'] = ck;
+    }
+    return new Promise<string>((resolve, reject) => {
+      const req = http.createHttp();
+      req.request(u, {
+        method: http.RequestMethod.GET,
+        connectTimeout: connectTimeout,
+        readTimeout: readTimeout,
+        expectDataType: http.HttpDataType.STRING,
+        header: header
+      }).then((resp: http.HttpResponse) => {
+        req.destroy();
+        if (resp.responseCode === 200) {
+          resolve(HttpUtil.bodyOf(resp));
+        } else {
+          reject(new Error('HTTP ' + resp.responseCode));
+        }
+      }).catch((err: BusinessError) => {
+        req.destroy();
+        reject(new Error(err.message));
+      });
+    });
+  }
+
+  /**
    * 带自定义 Referer 的 GET（只接受 200，其余抛错）。
    * 豆瓣的 rexxar 接口有两道硬门槛：
    *   1) UA 必须是浏览器 UA，okhttp 之类直接回 1287 invalid_request
@@ -799,6 +844,14 @@ export class HttpUtil {
   /** 同 getJson，但自带 Referer / UA（站点按 UA 分流时必须用这个） */
   static async getJsonWith<T>(url: string, referer: string, ua: string): Promise<T> {
     const text: string = await HttpUtil.getTextWith(url, referer, ua);
+    return HttpUtil.parseJsonBody<T>(text, url);
+  }
+
+  /** 同 getJsonWith，但超时放宽给慢站（网页规则站的 macCMS 全库接口） */
+  static async getJsonWithTimeout<T>(url: string, referer: string, ua: string,
+    connectTimeout: number, readTimeout: number): Promise<T> {
+    const text: string = await HttpUtil.getTextWithTimeout(
+      url, referer, ua, connectTimeout, readTimeout);
     return HttpUtil.parseJsonBody<T>(text, url);
   }
 
