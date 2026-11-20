@@ -12,7 +12,6 @@ import { BackdropStore } from '../utils/BackdropStore';
 import { HttpUtil } from '../utils/HttpUtil';
 import { ImageCache } from '../utils/ImageCache';
 import { DoubanAuth } from '../utils/DoubanAuth';
-import { SeedDefaults } from '../utils/SeedDefaults';
 import { PinStore } from '../utils/PinStore';
 import { SideNav } from '../components/SideNav';
 
@@ -220,9 +219,8 @@ struct Home {
   private async boot(): Promise<void> {
     this.loading = true;
     const ctx = getContext(this) as common.Context;
-    // 首启预置：把原版里填好的 PIN 与豆瓣登录态搬进本应用沙箱。
-    // 必须在 DoubanAuth.init / 任何 PinStore.get 之前，否则先读了空文件就晚了。
-    SeedDefaults.seed(ctx);
+    // 开源版不预置任何站点（BuiltinConfig 是空容器），首启进设置页自己填配置地址。
+    // 没有站点时走下面的 needConfig 空态提示，不在这里做任何预置。
     this.pin = PinStore.get(ctx);
     HttpUtil.init(ctx);
     DoubanAuth.init(ctx);
@@ -1816,10 +1814,10 @@ struct Home {
       // ---- 未配置源时的引导 ----
       if (this.needConfig) {
         Column({ space: 18 }) {
-          Text('还没有配置片源')
+          Text('还没有点播源')
             .fontSize(26)
             .fontColor('#FFFFFF')
-          Text('去设置里载入一份配置接口')
+          Text('去设置里载入配置接口，或从地址簿添加站点')
             .fontSize(15)
             .fontColor('#9C9CA8')
           Text('打开设置')

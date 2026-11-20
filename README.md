@@ -161,7 +161,7 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 
 ## 五、首次使用
 
-打开 App 后首页会提示「还没有配置片源」，点「去设置」：
+打开 App 后首页会提示「还没有点播源」，点「打开设置」：
 
 1. 在「点播源」填一个配置地址（例如你自己的苹果CMS 接口，或一份 `{"sites":[...]}` 配置）；
 2. 需要直播就单独填「直播源」，可填 m3u / txt / 带 `lives` 的配置；
