@@ -120,6 +120,25 @@ export struct About {
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1)
+
+      Column({ space: 8 }) {
+        Column() {
+          Image($r('app.media.wechat_reward'))
+            .width(112)
+            .height(112)
+            .objectFit(ImageFit.Contain)
+            .borderRadius(9)
+            .backgroundColor('#FFFFFF')
+        }
+        .padding(7)
+        .borderRadius(16)
+        .backgroundColor('#17181F')
+        .border({ width: 1, color: '#4DFF8A3D' })
+        Text('手机扫码，请作者喝杯咖啡')
+          .fontSize(11.5)
+          .fontColor(C_DIM)
+      }
+      .alignItems(HorizontalAlign.Center)
     }
     .width('100%')
     .padding({ left: 26, right: 26, top: 22, bottom: 22 })
