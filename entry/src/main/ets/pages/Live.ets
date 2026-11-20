@@ -1,4 +1,5 @@
 import { router } from '@kit.ArkUI';
+import { KeyCode } from '@kit.InputKit';
 import { common } from '@kit.AbilityKit';
 import { ConfigStore } from '../utils/ConfigStore';
 import { AppState } from '../utils/AppState';
@@ -8,6 +9,10 @@ import { LiveMarkStore, LiveFav } from '../utils/LiveMarkStore';
 import { EpgStore, EpgNowNext, EpgProg } from '../utils/EpgStore';
 import { LiveCfg } from '../model/TvBoxModels';
 import { SideNav } from '../components/SideNav';
+import { LivePreview } from '../components/LivePreview';
+
+const VIEW_FAV: number = 0;
+const VIEW_ALL: number = 1;
 
 /**
  * 直播页：解析配置里的 lives（txt 频道表 / m3u 播放列表），左侧分组、右侧频道。
@@ -37,17 +42,22 @@ struct Live {
   /** 实际渲染用的分组：只含直播源自己的分组，收藏由左上角按钮独立展示 */
   @State uiGroups: LiveGroup[] = [];
   @State groupIdx: number = 0;
-  /** 是否正在看「收藏」视图：跟直播源载入状态完全独立 */
-  @State showFav: boolean = false;
-  /** 「清除全部」的二次确认：第一次点只把按钮改成「确认清除」 */
+  /** 当前视图：收藏 / 全部频道 */
+  @State viewMode: number = VIEW_FAV;
+  /** 焦点频道在 curChannels() 里的下标；大卡预览只认它 */
+  @State @Watch('onFocusIdxChanged') focusIdx: number = 0;
+  /** 预览真正播起来的线路，进入播放页时继承它，避免换个线路重新加载 */
+  @State previewPlayingUrl: string = '';
+  /** 是否展开右上角「分类」下拉列表（仅全部频道视图） */
+  @State showGroups: boolean = false;
+  /** 「清除全部」的二次确认 */
   @State confirmClearFav: boolean = false;
   @State loading: boolean = false;
   @State err: string = '';
   /** 收藏 / 取消收藏后的即时反馈 */
   @State tip: string = '';
-  /** 收藏 / 已点过的地址快照，用于渲染与判断（Store 里也有一份，避免每次读文件） */
+  /** 收藏地址快照，用于渲染与判断（Store 里也有一份，避免每次读文件） */
   @State favUrls: string[] = [];
-  @State seenUrls: string[] = [];
   /** 遥控器焦点标记（自绘焦点态） */
   @State focusId: string = '';
   /** 刚点过星标的时间戳：GridItem 的 onClick 会跟着触发，用它挡掉"收藏顺手把片子打开" */
@@ -99,7 +109,9 @@ struct Live {
       // 进来先落在收藏：点开直播多半是看常看的几个频道，不用等网络直播源探活。
       // 放在读配置之前，首帧就是收藏，不会先闪一下加载态。
       if (this.favUrls.length > 0) {
-        this.showFav = true;
+        this.viewMode = VIEW_FAV;
+      } else {
+        this.viewMode = VIEW_ALL;
       }
       this.startEpg(ctx);
       await ConfigStore.init(ctx);
@@ -185,7 +197,7 @@ struct Live {
     }
     this.liveIdx = idx;
     // 点了某个直播源就回到该源的分组，别还停在收藏视图里
-    this.showFav = false;
+    this.viewMode = VIEW_ALL;
     this.confirmClearFav = false;
     this.loading = true;
     this.err = '';
@@ -213,7 +225,6 @@ struct Live {
       f.push(it.url);
     }
     this.favUrls = f;
-    this.seenUrls = LiveMarkStore.seenList(this.ctx).slice();
   }
 
   /** 只放直播源自身的分组（收藏不再混进来），尽量保持当前选中的分组不变 */
@@ -279,13 +290,60 @@ struct Live {
   }
 
   private curChannels(): LiveChannel[] {
-    if (this.showFav) {
+    if (this.viewMode === VIEW_FAV) {
       return this.favChannels();
     }
     if (this.uiGroups.length === 0 || this.groupIdx >= this.uiGroups.length) {
       return [];
     }
     return this.uiGroups[this.groupIdx].channels;
+  }
+
+  /** 焦点频道的预览地址：优先上次放出来的线路，避免大卡一直撞死线 */
+  private focusChannel(): LiveChannel | null {
+    const list: LiveChannel[] = this.curChannels();
+    if (list.length === 0) {
+      return null;
+    }
+    if (this.focusIdx < 0 || this.focusIdx >= list.length) {
+      this.focusIdx = 0;
+    }
+    return list[this.focusIdx];
+  }
+
+  /** 焦点一变就清掉上一频道的预览线路，防止进播放页时继承错频道 */
+  private onFocusIdxChanged(): void {
+    this.previewPlayingUrl = '';
+  }
+
+  /** 大卡重建 key 列表：无焦点时为空（ForEach 不渲染），否则只含当前焦点频道一项 */
+  private focusCardKeys(): string[] {
+    const ch: LiveChannel | null = this.focusChannel();
+    if (ch === null) {
+      return [];
+    }
+    return [this.previewKeyOf(ch)];
+  }
+
+  /** 预览组件的重建 key：频道 + 当前线路，两者任一变化都强制重建播放器 */
+  private previewKeyOf(ch: LiveChannel): string {
+    const key: string = ch.id.length > 0 ? ch.id : ch.name;
+    return key + '|' + this.previewUrlOf(ch);
+  }
+
+  private previewUrlOf(ch: LiveChannel): string {
+    const urls: string[] = this.lineUrls(ch);
+    if (urls.length === 0) {
+      return '';
+    }
+    const key: string = ch.id.length > 0 ? ch.id : ch.name;
+    if (this.ctx !== null) {
+      const good: string = LiveMarkStore.lastGood(this.ctx, key);
+      if (urls.indexOf(good) >= 0) {
+        return good;
+      }
+    }
+    return urls[0];
   }
 
   /** 一个频道的全部线路地址（合并后可能有好几条） */
@@ -312,30 +370,6 @@ struct Live {
     return false;
   }
 
-  private isSeen(ch: LiveChannel): boolean {
-    for (const u of this.lineUrls(ch)) {
-      if (this.seenUrls.indexOf(u) >= 0) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** 格子区顶部那行小字：收藏反馈优先，其次说明「藏掉了几个空源」 */
-  private infoText(): string {
-    if (this.tip.length > 0) {
-      return this.tip;
-    }
-    if (this.showFav) {
-      return this.favUrls.length > 0
-        ? '收藏频道存在本机，与直播源无关 · 点左侧分组回到直播频道 · 点格子右上角 ★ 取消收藏'
-        : '还没有收藏频道 · 点左侧分组看直播，在格子右上角点 ☆ 收藏';
-    }
-    const head: string = this.hiddenCount > 0
-      ? '已隐藏 ' + this.hiddenCount + ' 个空的直播源 · ' : '';
-    return head + '已点过但放不出来的频道会变暗 · 点格子右上角 ☆ 收藏';
-  }
-
   private curGroupName(): string {
     const gs: LiveGroup[] = this.uiGroups;
     if (this.groupIdx < gs.length) {
@@ -349,7 +383,10 @@ struct Live {
       return;
     }
     this.lastStarTs = Date.now();
-    const f: LiveFav = { name: ch.name, url: ch.url, group: this.showFav ? '★ 收藏' : this.curGroupName() };
+    const f: LiveFav = {
+      name: ch.name, url: ch.url,
+      group: this.viewMode === VIEW_FAV ? '★ 收藏' : this.curGroupName()
+    };
     const on: boolean = LiveMarkStore.toggleFav(this.ctx, f, this.lineUrls(ch));
     this.refreshMarks();
     this.rebuildGroups();
@@ -366,10 +403,21 @@ struct Live {
       return;
     }
     const key: string = ch.id.length > 0 ? ch.id : ch.name;
-    // 上次真能放出来的线路优先，没有就从第一条开始。
-    // 源站的第一条经常已经串台（放出来是购物台）或者直接失效，所以不能盲信顺序。
+    // 线路优先级：预览此刻真正在播的那条 > 上次能放出来的 > 第一条。
+    // 大卡预览已经把这条线路拉通了，进播放页继续用它，不然会重新加载、黑屏一次。
     let start: number = 0;
-    if (this.ctx !== null) {
+    let matched: boolean = false;
+    const playingUrl: string = this.previewPlayingUrl;
+    if (playingUrl.length > 0) {
+      for (let i = 0; i < urls.length; i++) {
+        if (urls[i] === playingUrl) {
+          start = i;
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (!matched && this.ctx !== null) {
       const good: string = LiveMarkStore.lastGood(this.ctx, key);
       if (good.length > 0) {
         for (let i = 0; i < urls.length; i++) {
@@ -379,11 +427,6 @@ struct Live {
           }
         }
       }
-      // 点过就记下所有线路（不管能不能放出来）——正是为了下次避开死频道
-      for (const u of urls) {
-        LiveMarkStore.markSeen(this.ctx, u);
-      }
-      this.refreshMarks();
     }
     router.pushUrl({
       url: 'pages/Player',
@@ -399,14 +442,6 @@ struct Live {
         liveKey: key
       }
     });
-  }
-
-  private clearSeen(): void {
-    if (this.ctx === null) {
-      return;
-    }
-    LiveMarkStore.clearSeen(this.ctx);
-    this.refreshMarks();
   }
 
   /** 频道台标文字：中文取首字，英文数字连取两位（CCTV-1 → CC） */
@@ -435,26 +470,10 @@ struct Live {
     return palette[h % palette.length];
   }
 
-  /** 左侧栏「收藏」下面的小标题：当前直播源名，有空源被藏起来时补一句。
-   *  收藏本身已是列表第一项且会高亮，这里不再跟着视图改成「收藏频道」，避免重复。 */
-  private liveTitle(): string {
-    let name: string = '';
-    if (this.liveIdx < this.okLives.length) {
-      name = (this.okLives[this.liveIdx].name ?? '').trim();
-    } else if (this.lives.length > 0) {
-      name = (this.lives[0].name ?? '').trim();
-    }
-    if (name.length === 0) {
-      name = '直播源';
-    }
-    return name + (this.hiddenCount > 0 ? '（隐藏' + this.hiddenCount.toString() + '空源）' : '');
-  }
-
   /** 清空收藏：第一次点只进入确认态，避免遥控误触一次清掉 49 个频道 */
   private clearAllFavs(): void {
     if (!this.confirmClearFav) {
       this.confirmClearFav = true;
-      this.tip = '再点一次「确认清除」';
       return;
     }
     if (this.ctx === null) {
@@ -466,6 +485,405 @@ struct Live {
     this.rebuildGroups();
     this.confirmClearFav = false;
     this.tip = '已清除 ' + n.toString() + ' 个收藏';
+  }
+
+  /** 数字键 1-9 选前 9 个频道，0 选第 10 个；菜单键展开/收起分类下拉 */
+  private handleKey(e: KeyEvent): boolean {
+    if (e.type !== KeyType.Down) {
+      return false;
+    }
+    const code: number = e.keyCode;
+    if (code === KeyCode.KEYCODE_MENU) {
+      if (this.viewMode === VIEW_ALL && this.uiGroups.length > 1) {
+        this.showGroups = !this.showGroups;
+        return true;
+      }
+      return false;
+    }
+    let digit: number = -1;
+    if (code >= KeyCode.KEYCODE_0 && code <= KeyCode.KEYCODE_9) {
+      digit = code - KeyCode.KEYCODE_0;
+    } else if (code >= KeyCode.KEYCODE_NUMPAD_0 && code <= KeyCode.KEYCODE_NUMPAD_0 + 9) {
+      digit = code - KeyCode.KEYCODE_NUMPAD_0;
+    }
+    if (digit < 0) {
+      return false;
+    }
+    const idx: number = digit === 0 ? 9 : digit - 1;
+    if (idx >= this.curChannels().length) {
+      return true;
+    }
+    this.focusIdx = idx;
+    this.focusId = 'c-' + idx.toString();
+    setTimeout(() => {
+      try {
+        this.getUIContext().getFocusController().requestFocus('live-ch-' + idx.toString());
+      } catch (err) {}
+    }, 30);
+    return true;
+  }
+
+  private epgProgress(ch: LiveChannel, tick: number): number {
+    if (tick < 0) {
+      return 0;
+    }
+    const nn: EpgNowNext | null = this.nowNextOf(ch);
+    if (nn === null || nn.cur === null || nn.cur.e <= nn.cur.s) {
+      return 0;
+    }
+    const pct: number = Math.round((Date.now() - nn.cur.s) * 100 / (nn.cur.e - nn.cur.s));
+    return pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+  }
+
+  private epgRange(ch: LiveChannel, tick: number): string {
+    if (tick < 0) {
+      return '';
+    }
+    const nn: EpgNowNext | null = this.nowNextOf(ch);
+    if (nn === null || nn.cur === null) {
+      return '';
+    }
+    return this.hhmm(nn.cur.s) + ' - ' + this.hhmm(nn.cur.e);
+  }
+
+  @Builder
+  viewTab(label: string, mode: number, key: string, onTap: () => void) {
+    Column() {
+      Text(label)
+        .fontSize(15)
+        .fontWeight(this.viewMode === mode ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.viewMode === mode ? '#FFB37A' : (this.focusId === key ? '#FFFFFF' : '#9A9AA6'))
+        .height(30)
+        .maxLines(1)
+      Row()
+        .width(this.viewMode === mode ? 28 : 0)
+        .height(2)
+        .borderRadius(1)
+        .backgroundColor('#FF8A3D')
+    }
+    .height(46)
+    .padding({ left: 16, right: 16 })
+    .borderRadius(8)
+    .focusable(true)
+    .onFocus(() => { this.focusId = key; })
+    .onBlur(() => { this.focusId = ''; })
+    .onClick(onTap)
+  }
+
+  /** 右上角「分类」下拉浮层：列出全部频道的所有分组，点一项切换 */
+  @Builder
+  groupDropdown() {
+    Scroll() {
+      Column() {
+        ForEach(this.uiGroups, (g: LiveGroup, idx: number) => {
+        Row() {
+          Row()
+            .width(3)
+            .height(20)
+            .borderRadius(2)
+            .backgroundColor(idx === this.groupIdx ? '#FF8A3D' : Color.Transparent)
+            .margin({ right: 10 })
+          Text(g.name)
+            .fontSize(14)
+            .fontWeight(idx === this.groupIdx ? FontWeight.Medium : FontWeight.Normal)
+            .fontColor(idx === this.groupIdx ? '#FFB37A' : '#C9C9D4')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+          Text(g.channels.length.toString() + ' 个')
+            .fontSize(11)
+            .fontColor('#6E6E7A')
+            .margin({ left: 8 })
+        }
+        .width('100%')
+        .height(40)
+        .padding({ left: 12, right: 14 })
+        .borderRadius(8)
+        .backgroundColor(idx === this.groupIdx ? '#1FFF8A3D'
+          : (this.focusId === ('gd-' + idx) ? '#1AFFFFFF' : Color.Transparent))
+        .focusable(true)
+        .onFocus(() => { this.focusId = 'gd-' + idx; })
+        .onBlur(() => { this.focusId = ''; })
+        .onClick(() => {
+          this.groupIdx = idx;
+          this.focusIdx = 0;
+          this.showGroups = false;
+          this.tip = '';
+        })
+      }, (g: LiveGroup, idx: number) => g.name + String(idx))
+      }
+      .width('100%')
+    }
+    .width(260)
+    .constraintSize({ maxHeight: 480 })
+    .scrollBar(BarState.Off)
+    .padding(6)
+    .borderRadius(12)
+    .backgroundColor('#141720')
+    .border({ width: 1, color: '#333744' })
+    .shadow({ radius: 24, color: '#99000000', offsetY: 8 })
+    .position({ right: 52, top: 76 })
+    .zIndex(100)
+  }
+
+  @Builder
+  focusCard(ch: LiveChannel) {
+    Column() {
+      // 电视机：屏幕占满大卡宽度，无外加背景
+      Column() {
+        Stack() {
+          // 关键：用 key 强制预览组件随频道重建，不能只靠 @Prop @Watch。
+          // 切台若只换 url 而不重建，播放器实例和 phase 会停在上一频道，
+          // 表现为「点小卡毫无反应 / 雪花屏只在第一次出现」。
+          ForEach([this.previewKeyOf(ch)], (key: string) => {
+            LivePreview({
+              url: this.previewUrlOf(ch),
+              onStateChange: (phase: string, url: string) => {
+                // 旧预览实例 release 前的 playing 回调可能晚到，只认当前焦点频道的线路，
+                // 否则进播放页会继承到上一个频道的地址。
+                if (phase === 'playing' && this.lineUrls(ch).indexOf(url) >= 0) {
+                  this.previewPlayingUrl = url;
+                }
+              }
+            })
+          }, (key: string) => key)
+          Text('点画面进入全屏')
+            .fontSize(11)
+            .fontColor('#D8D8E0')
+            .backgroundColor('#99000000')
+            .borderRadius(10)
+            .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+            .position({ right: 10, bottom: 10 })
+        }
+        .width('100%')
+        .height(300)
+        .borderRadius(6)
+        .clip(true)
+        .onClick(() => { this.play(ch); })
+
+        // 机身底部铭牌：左侧频道名 + 收藏，右侧播放说明
+        Row({ space: 16 }) {
+          Row({ space: 8 }) {
+            Text(ch.name)
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#FFFFFF')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .constraintSize({ maxWidth: 300 })
+            Text(this.isFav(ch) ? '★' : '')
+              .fontSize(15)
+              .fontColor('#FFB300')
+          }
+          .alignItems(VerticalAlign.Center)
+          .flexShrink(0)
+
+          Blank()
+
+          // 右侧播放说明：正在播 / 接下来 / 进度
+          Column({ space: 4 }) {
+            if (this.epgNowText(ch, this.epgTick).length > 0) {
+              Text(this.epgNowText(ch, this.epgTick))
+                .fontSize(15)
+                .fontColor('#FFD9BC')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+            }
+            if (this.epgNextText(ch, this.epgTick).length > 0) {
+              Text(this.epgNextText(ch, this.epgTick))
+                .fontSize(12)
+                .fontColor('#9A9AA6')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+            }
+            if (this.epgRange(ch, this.epgTick).length > 0) {
+              Row({ space: 10 }) {
+                Text(this.epgRange(ch, this.epgTick))
+                  .fontSize(11)
+                  .fontColor('#A9A9B4')
+                Text(this.epgProgress(ch, this.epgTick).toString() + '%')
+                  .fontSize(11)
+                  .fontColor('#A9A9B4')
+                Text(this.lineUrls(ch).length > 1
+                  ? this.lineUrls(ch).length.toString() + ' 条线路'
+                  : '单线路')
+                  .fontSize(11)
+                  .fontColor('#7E7E8A')
+              }
+              Row() {
+                Row()
+                  .width(this.epgProgress(ch, this.epgTick).toString() + '%')
+                  .height(4)
+                  .borderRadius(2)
+                  .backgroundColor('#FF8A3D')
+              }
+              .width('100%')
+              .height(4)
+              .borderRadius(2)
+              .backgroundColor('#2A2C35')
+            } else {
+              Text(this.lineUrls(ch).length > 1
+                ? this.lineUrls(ch).length.toString() + ' 条线路可选'
+                : '单线路')
+                .fontSize(11)
+                .fontColor('#7E7E8A')
+            }
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.End)
+        }
+        .width('100%')
+        .padding({ left: 14, right: 14, top: 12, bottom: 4 })
+        .alignItems(VerticalAlign.Top)
+      }
+      .width('100%')
+      .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+      .borderRadius(14)
+      .backgroundColor('#1C1F2A')
+      .border({ width: 1, color: '#3A3F4E' })
+
+      // 电视机底座
+      Row()
+        .width(60)
+        .height(10)
+        .backgroundColor('#2A2E3C')
+      Row()
+        .width(148)
+        .height(5)
+        .borderRadius(3)
+        .backgroundColor('#3A3F4E')
+
+      // 今天接下来：占满大卡下方空区，填满节目单，无数据只留一行淡提示
+      Column({ space: 9 }) {
+        Row({ space: 8 }) {
+          Row()
+            .width(3)
+            .height(14)
+            .borderRadius(2)
+            .backgroundColor('#FF8A3D')
+          Text('今天接下来')
+            .fontSize(13)
+            .fontColor('#B9B9C6')
+        }
+        .width('100%')
+
+        ForEach(this.upcomingOf(ch, this.epgTick), (p: EpgProg, idx: number) => {
+          Row({ space: 12 }) {
+            Text(this.hhmm(p.s))
+              .fontSize(13)
+              .fontColor(idx === 0 ? '#FFB37A' : '#8A8A96')
+              .width(42)
+            Text(p.t)
+              .fontSize(14)
+              .fontColor(idx === 0 ? '#EDEDF2' : '#A9A9B6')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+          }
+          .width('100%')
+        }, (p: EpgProg) => p.s.toString() + p.t)
+
+        if (this.upcomingOf(ch, this.epgTick).length === 0) {
+          Text('暂无节目单')
+            .fontSize(12)
+            .fontColor('#6E6E7A')
+        }
+      }
+      .width('100%')
+      .margin({ top: 18, left: 12, right: 12 })
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+  }
+
+  @Builder
+  staticChannelCard(ch: LiveChannel, idx: number) {
+    Row({ space: 11 }) {
+      Stack() {
+        Row()
+          .width(42)
+          .height(42)
+          .borderRadius(12)
+          .backgroundColor(this.logoColor(ch))
+        Text(this.logoText(ch))
+          .fontSize(this.logoText(ch).length > 1 ? 15 : 19)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#FFFFFF')
+      }
+      .width(42)
+      .height(42)
+
+      Column({ space: 3 }) {
+        Text(ch.name)
+          .fontSize(14.5)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#EDEDF2')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        if (this.epgNowText(ch, this.epgTick).length > 0) {
+          Text(this.epgNowText(ch, this.epgTick))
+            .fontSize(11)
+            .fontColor('#FFD9BC')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+          Text(this.epgNextText(ch, this.epgTick).length > 0
+            ? this.epgNextText(ch, this.epgTick)
+            : ch.lines.length > 1 ? ch.lines.length.toString() + ' 条线路' : '单线路')
+            .fontSize(10)
+            .fontColor('#6E6E7A')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+        } else {
+          Text(ch.lines.length > 1 ? ch.lines.length.toString() + ' 条线路' : '单线路')
+            .fontSize(11.5)
+            .fontColor('#7E7E8A')
+            .width('100%')
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+
+      Text(this.isFav(ch) ? '★' : '☆')
+        .fontSize(15)
+        .fontColor(this.isFav(ch) ? '#FFB300' : '#5F5F6B')
+        .padding({ left: 4, right: 8, top: 6, bottom: 6 })
+        .onClick(() => { this.toggleFav(ch); })
+    }
+    .width('100%')
+    .height(82)
+    .padding({ left: 14, right: 8 })
+    .borderRadius(14)
+    .backgroundColor(this.focusIdx === idx ? '#24202B' : '#151720')
+    .border({ width: this.focusIdx === idx ? 1 : 0, color: '#FF8A3D' })
+    .id('live-ch-' + idx)
+    .focusable(true)
+    .defaultFocus(idx === 0)
+    .onFocus(() => {
+      this.focusId = 'c-' + idx;
+      this.focusIdx = idx;
+    })
+    .onBlur(() => {
+      this.focusId = '';
+    })
+    .onKeyEvent((e: KeyEvent) => { return this.handleKey(e); })
+    .onClick(() => {
+      if (Date.now() - this.lastStarTs < 600) {
+        return;
+      }
+      // 点小卡只切换预览，不进入播放页
+      this.focusIdx = idx;
+      this.focusId = 'c-' + idx;
+      setTimeout(() => {
+        try {
+          this.getUIContext().getFocusController().requestFocus('live-ch-' + idx.toString());
+        } catch (err) {}
+      }, 30);
+    })
   }
 
   @Builder
@@ -488,93 +906,25 @@ struct Live {
     .onClick(onTap)
   }
 
+  /** 小号 chip：直播源用，比顶栏主 chip 矮一圈，多个能横向铺开不占地方 */
   @Builder
-  groupRow(g: LiveGroup, idx: number) {
+  srcChip(label: string, on: boolean, urlKey: string, onTap: () => void) {
     Row() {
-      // 当前分组用一根橙色竖条标记，不再给整行套一圈边框：
-      // 一列行都描边时，被染色的那一圈看着就像多出来的「当前选框」
-      Row()
-        .width(3)
-        .height(22)
-        .borderRadius(2)
-        .backgroundColor(!this.showFav && idx === this.groupIdx ? '#FF8A3D' : Color.Transparent)
-        .margin({ right: 11 })
-
-      Column({ space: 3 }) {
-        Text(g.name)
-          .fontSize(14.5)
-          .fontWeight(!this.showFav && idx === this.groupIdx ? FontWeight.Medium : FontWeight.Normal)
-          .fontColor(!this.showFav && idx === this.groupIdx ? '#FFB37A' : '#C9C9D4')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        Text(g.channels.length.toString() + ' 个频道')
-          .fontSize(11.5)
-          .fontColor(!this.showFav && idx === this.groupIdx ? '#A97C5E' : '#6E6E7A')
-          .width('100%')
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
+      Text(label)
+        .fontSize(11.5)
+        .fontWeight(on ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(on ? '#150A04' : '#A9A9B6')
+        .maxLines(1)
     }
-    .width('100%')
-    .padding({ left: 12, right: 14, top: 12, bottom: 12 })
-    .borderRadius(12)
-    // 和频道卡同一套焦点语言：只提亮底色、不画框，当前分组另靠竖条 + 文字颜色
-    .backgroundColor(!this.showFav && idx === this.groupIdx
-      ? (this.focusId === ('g-' + idx) ? '#2BFF8A3D' : '#1FFF8A3D')
-      : (this.focusId === ('g-' + idx) ? '#1AFFFFFF' : '#0AFFFFFF'))
+    .height(30)
+    .padding({ left: 11, right: 11 })
+    .borderRadius(15)
+    .backgroundColor(on ? '#FF8A3D' : '#10FFFFFF')
+    .border({ width: 1, color: this.focusId === urlKey ? '#FFD9BC' : (on ? '#FF8A3D' : '#1AFFFFFF') })
     .focusable(true)
-    .onFocus(() => { this.focusId = 'g-' + idx; })
+    .onFocus(() => { this.focusId = urlKey; })
     .onBlur(() => { this.focusId = ''; })
-    .onClick(() => {
-      this.groupIdx = idx;
-      this.showFav = false;
-      this.confirmClearFav = false;
-      this.tip = '';
-    })
-  }
-
-  /** 收藏入口：和分组行同一套字号、底色、竖条与焦点态，放在分组列表最上面 */
-  @Builder
-  favRow() {
-    Row() {
-      Row()
-        .width(3)
-        .height(22)
-        .borderRadius(2)
-        .backgroundColor(this.showFav ? '#FF8A3D' : Color.Transparent)
-        .margin({ right: 11 })
-
-      Column({ space: 3 }) {
-        Text('★ 收藏')
-          .fontSize(14.5)
-          .fontWeight(this.showFav ? FontWeight.Medium : FontWeight.Normal)
-          .fontColor(this.showFav ? '#FFB37A' : '#C9C9D4')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        Text(this.favUrls.length.toString() + ' 个频道')
-          .fontSize(11.5)
-          .fontColor(this.showFav ? '#A97C5E' : '#6E6E7A')
-          .width('100%')
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .padding({ left: 12, right: 14, top: 12, bottom: 12 })
-    .borderRadius(12)
-    .backgroundColor(this.showFav
-      ? (this.focusId === 'favrow' ? '#2BFF8A3D' : '#1FFF8A3D')
-      : (this.focusId === 'favrow' ? '#1AFFFFFF' : '#0AFFFFFF'))
-    .focusable(true)
-    .onFocus(() => { this.focusId = 'favrow'; })
-    .onBlur(() => { this.focusId = ''; })
-    .onClick(() => {
-      this.showFav = !this.showFav;
-      this.confirmClearFav = false;
-      this.tip = '';
-    })
+    .onClick(onTap)
   }
 
   /** HH:mm（本地时区），节目单里到处要用 */
@@ -587,6 +937,14 @@ struct Live {
 
   private nowNextOf(ch: LiveChannel): EpgNowNext | null {
     return EpgStore.nowNext(ch.id, ch.name);
+  }
+
+  /** 接下来 3 档；tick 只为把 epgTick 读进渲染依赖，节目单随时间往前推 */
+  private upcomingOf(ch: LiveChannel, tick: number): EpgProg[] {
+    if (tick < 0) {
+      return [];
+    }
+    return EpgStore.upcoming(ch.id, ch.name, 3);
   }
 
   /**
@@ -616,81 +974,6 @@ struct Live {
     return '接下来 ' + this.hhmm(p.s) + ' ' + p.t;
   }
 
-  @Builder
-  channelCard(ch: LiveChannel, idx: number) {
-    Row({ space: 11 }) {
-      // 台标：多数 txt 源没有 logo，用首字色块代替，比空白或破图强
-      Stack() {
-        Row()
-          .width(42)
-          .height(42)
-          .borderRadius(12)
-          .backgroundColor(this.logoColor(ch))
-        Text(this.logoText(ch))
-          .fontSize(this.logoText(ch).length > 1 ? 15 : 19)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#FFFFFF')
-      }
-      .width(42)
-      .height(42)
-
-      Column({ space: 3 }) {
-        Text(ch.name)
-          .fontSize(14.5)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.isSeen(ch) ? '#8A867E' : '#EDEDF2')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        // 有节目单就把「N 条线路」让位给正在播 / 接下来
-        if (this.epgNowText(ch, this.epgTick).length > 0) {
-          Text(this.epgNowText(ch, this.epgTick))
-            .fontSize(11)
-            .fontColor(this.isSeen(ch) ? '#6E6A62' : '#FFD9BC')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
-          Text(this.epgNextText(ch, this.epgTick).length > 0
-            ? this.epgNextText(ch, this.epgTick)
-            : ch.lines.length > 1 ? ch.lines.length.toString() + ' 条线路' : '单线路')
-            .fontSize(10)
-            .fontColor('#6E6E7A')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
-        } else {
-          Text(ch.lines.length > 1 ? ch.lines.length.toString() + ' 条线路' : '单线路')
-            .fontSize(11.5)
-            .fontColor(this.isSeen(ch) ? '#5C5A55' : '#7E7E8A')
-            .width('100%')
-        }
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-
-      Text(this.isFav(ch) ? '★' : '☆')
-        .fontSize(15)
-        .fontColor(this.isFav(ch) ? '#FFB300' : '#5F5F6B')
-        .padding({ left: 4, right: 8, top: 6, bottom: 6 })
-        .onClick(() => { this.toggleFav(ch); })
-    }
-    .width('100%')
-    .height(82)
-    .padding({ left: 14, right: 8 })
-    .borderRadius(16)
-    // 焦点只做「底色提亮 + 微微浮起」：原来那圈白边和橙色辉光像在宣告
-    // 「这张是当前播放」，其实只是光标停在这儿
-    .backgroundColor(this.focusId === ('c-' + idx) ? '#26FFFFFF' : '#0DFFFFFF')
-    .scale({ x: this.focusId === ('c-' + idx) ? 1.015 : 1, y: this.focusId === ('c-' + idx) ? 1.015 : 1 })
-    .animation({ duration: 140 })
-    .id('live-ch-' + idx)
-    .focusable(true)
-    .defaultFocus(idx === 0)
-    .onFocus(() => { this.focusId = 'c-' + idx; })
-    .onBlur(() => { this.focusId = ''; })
-    .onClick(() => { this.play(ch); })
-  }
-
   build() {
     Row() {
       SideNav({ active: 2 })
@@ -715,48 +998,80 @@ struct Live {
           .margin({ left: 1100, top: -260 })
 
         Column() {
-          // ---- 标题行 ----
+          // ---- 顶栏：标题 + 视图标签 + 右侧操作 ----
           Row() {
             Text('直播')
-              .fontSize(34)
+              .fontSize(30)
               .fontWeight(FontWeight.Bold)
               .fontColor('#FFFFFF')
 
+            // 视图标签挪到顶栏，紧跟标题，隔开一点
+            Row({ space: 4 }) {
+              this.viewTab('收藏', VIEW_FAV, 'view-fav', () => {
+                this.viewMode = VIEW_FAV;
+                this.focusIdx = 0;
+                this.tip = '';
+                this.showGroups = false;
+              })
+              this.viewTab('全部频道', VIEW_ALL, 'view-all', () => {
+                this.viewMode = VIEW_ALL;
+                this.focusIdx = 0;
+                this.tip = '';
+                this.confirmClearFav = false;
+                this.showGroups = false;
+              })
+            }
+            .margin({ left: 34 })
+
             Blank()
 
-            // 直播源切换（只有多个可用源时才出现）
-            if (this.okLives.length > 1) {
-              Row({ space: 8 }) {
-                ForEach(this.okLives, (l: LiveCfg, idx: number) => {
-                  this.topChip(l.name, idx === this.liveIdx, 'src-' + idx, () => { this.loadLive(idx); })
-                }, (l: LiveCfg, idx: number) => l.name + String(idx))
+            Row({ space: 12 }) {
+              // 可用直播源 chip：贴在频道按钮左侧，空源探活阶段已排除；多个向左铺开
+              if (this.viewMode === VIEW_ALL && this.okLives.length > 0) {
+                Row({ space: 6 }) {
+                  ForEach(this.okLives, (l: LiveCfg, idx: number) => {
+                    this.srcChip(l.name, idx === this.liveIdx, 'src-' + idx, () => {
+                      this.loadLive(idx);
+                      this.showGroups = false;
+                    })
+                  }, (l: LiveCfg, idx: number) => l.name + String(idx))
+                }
               }
-              .margin({ right: 12 })
-            }
-
-            Row({ space: 10 }) {
-              if (this.showFav && this.favUrls.length > 0) {
-                this.topChip(this.confirmClearFav ? '确认清除' : '清除全部',
+              // 分类下拉：仅「全部频道」且有多个分组时出现，按钮显示当前分组名
+              if (this.viewMode === VIEW_ALL && this.uiGroups.length > 1) {
+                this.topChip(this.curGroupName() + ' ▾', this.showGroups, 'groupdrop', () => {
+                  this.showGroups = !this.showGroups;
+                })
+              }
+              // 「清空收藏」只属于收藏视图；二次确认提示贴在按钮左边
+              if (this.viewMode === VIEW_FAV && this.favUrls.length > 0) {
+                if (this.confirmClearFav) {
+                  Text('再按一下确认清空')
+                    .fontSize(12)
+                    .fontColor('#FFB37A')
+                }
+                this.topChip('清空收藏',
                   this.confirmClearFav, 'clearfav', () => { this.clearAllFavs(); })
-              }
-
-              if (this.seenUrls.length > 0 && !this.showFav) {
-                this.topChip('清除已看', false, 'clear', () => { this.clearSeen(); })
               }
             }
           }
           .width('100%')
-          .height(56)
+          .height(50)
           .alignItems(VerticalAlign.Center)
-          .margin({ top: 26 })
+          .margin({ top: 20 })
+
+          // ---- 分类改成右上角下拉按钮，这一行只留间距 ----
+          Row()
+            .width('100%')
+            .height(20)
 
           // ---- 主体 ----
-          if (this.lives.length === 0 && this.favUrls.length === 0 && !this.showFav) {
+          if (this.lives.length === 0 && this.favUrls.length === 0) {
             Column({ space: 14 }) {
               Text('没有直播源')
                 .fontSize(24)
                 .fontColor('#EDEDF2')
-              Text('去设置里单独填一个 m3u / txt 直链，或载入一份带直播源的配置')
+              Text('打开设置，填入 m3u / txt 直播源')
                 .fontSize(14)
                 .fontColor('#8E8E9A')
               Text('打开设置')
@@ -774,7 +1089,7 @@ struct Live {
             .width('100%')
             .layoutWeight(1)
             .justifyContent(FlexAlign.Center)
-          } else if (!this.showFav && this.loading) {
+          } else if (this.viewMode === VIEW_ALL && this.loading) {
             Column({ space: 12 }) {
               LoadingProgress().width(46).height(46).color('#FF8A3D')
               Text(this.probeTip.length > 0 ? this.probeTip : '正在加载直播源…')
@@ -784,7 +1099,7 @@ struct Live {
             .width('100%')
             .layoutWeight(1)
             .justifyContent(FlexAlign.Center)
-          } else if (!this.showFav && this.err.length > 0) {
+          } else if (this.viewMode === VIEW_ALL && this.err.length > 0) {
             Column({ space: 18 }) {
               Text(this.err)
                 .fontSize(15)
@@ -812,86 +1127,101 @@ struct Live {
             .width('100%')
             .layoutWeight(1)
             .justifyContent(FlexAlign.Center)
-          } else {
-            Row() {
-              // 左侧分组
-              Column() {
-                List({ space: 8 }) {
-                  ListItem() {
-                    this.favRow()
-                  }
-                  // 直播源名排在收藏下面：下面这些分组都属于它
-                  ListItem() {
-                    Text(this.liveTitle())
-                      .fontSize(11.5)
-                      .fontColor('#6E6E7A')
-                      .width('100%')
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                      .padding({ left: 15, right: 6, top: 2, bottom: 2 })
-                  }
-                  ForEach(this.uiGroups, (g: LiveGroup, idx: number) => {
-                    ListItem() {
-                      this.groupRow(g, idx)
-                    }
-                  }, (g: LiveGroup, idx: number) => g.name + String(idx))
-                }
-                .width('100%')
-                .layoutWeight(1)
-                .scrollBar(BarState.Off)
+          } else if (this.curChannels().length === 0) {
+            // 收藏 / 全部频道各自为空：整屏居中，避免左边大卡区半屏空白
+            Column({ space: 14 }) {
+              Text(this.viewMode === VIEW_FAV ? '还没有收藏频道' : '这个直播源没有频道')
+                .fontSize(22)
+                .fontColor('#EDEDF2')
+              Text(this.viewMode === VIEW_FAV
+                ? '切到「全部频道」，在频道右上角点 ☆ 收藏'
+                : '换个直播源，或去设置检查源地址')
+                .fontSize(13)
+                .fontColor('#8E8E9A')
+              if (this.viewMode === VIEW_FAV) {
+                Text('去全部频道')
+                  .fontSize(16)
+                  .fontColor('#150A04')
+                  .height(48)
+                  .padding({ left: 30, right: 30 })
+                  .borderRadius(24)
+                  .backgroundColor('#FF8A3D')
+                  .textAlign(TextAlign.Center)
+                  .margin({ top: 10 })
+                  .focusable(true)
+                  .onClick(() => {
+                    this.viewMode = VIEW_ALL;
+                    this.focusIdx = 0;
+                    this.tip = '';
+                  })
               }
-              .width(196)
-              .height('100%')
-              .alignItems(HorizontalAlign.Start)
+            }
+            .width('100%')
+            .layoutWeight(1)
+            .justifyContent(FlexAlign.Center)
+          } else {
+            Column() {
+              if (this.tip.length > 0) {
+                Text(this.tip)
+                  .fontSize(12.5)
+                  .fontColor('#FFB37A')
+                  .width('100%')
+                  .margin({ bottom: 8, left: 4 })
+              }
 
-              // 右侧频道
-              Column() {
-                if (this.tip.length > 0) {
-                  Text(this.tip)
-                    .fontSize(12.5)
-                    .fontColor('#FFB37A')
-                    .width('100%')
-                    .margin({ bottom: 10, left: 4 })
+              Row({ space: 20 }) {
+                // 左半屏：焦点大卡（电视机外框 + 右侧播放说明）
+                // 用 ForEach + key 强制重建：@Builder 按值传对象参数，焦点变了内部不刷新，
+                // 必须靠 key 变化让整棵大卡子树重建，频道名/EPG/预览才会一起更新。
+                Column() {
+                  ForEach(this.focusCardKeys(), (key: string) => {
+                    this.focusCard(this.focusChannel() as LiveChannel)
+                  }, (key: string) => key)
                 }
-                if (this.curChannels().length === 0) {
-                  Text(this.showFav ? '还没有收藏频道。在频道卡片右侧点 ☆ 就能收藏' : '这个分组里没有频道')
-                    .fontSize(14)
-                    .fontColor('#7E7E8A')
-                    .margin({ top: 40 })
-                } else {
+                .width('50%')
+                .height('100%')
+                .justifyContent(FlexAlign.Start)
+
+                // 右半屏：频道小卡两两排列
+                Column() {
                   Grid() {
                     ForEach(this.curChannels(), (ch: LiveChannel, idx: number) => {
                       GridItem() {
-                        this.channelCard(ch, idx)
+                        this.staticChannelCard(ch, idx)
                       }
                     }, (ch: LiveChannel, idx: number) => ch.name + String(idx) + ch.url)
                   }
-                  .columnsTemplate('1fr 1fr 1fr')
-                  .columnsGap(14)
-                  .rowsGap(14)
+                  .columnsTemplate('1fr 1fr')
+                  .columnsGap(12)
+                  .rowsGap(12)
                   .width('100%')
                   .layoutWeight(1)
                   .scrollBar(BarState.Off)
                 }
+                .layoutWeight(1)
+                .height('100%')
+                .alignItems(HorizontalAlign.Start)
               }
+              .width('100%')
               .layoutWeight(1)
-              .height('100%')
-              .alignItems(HorizontalAlign.Start)
-              .margin({ left: 28 })
             }
             .width('100%')
             .layoutWeight(1)
-            .alignItems(VerticalAlign.Top)
-            .margin({ top: 26 })
           }
         }
         .width('100%')
         .height('100%')
         .padding({ left: 48, right: 52, bottom: 26 })
         .alignItems(HorizontalAlign.Start)
+        .onKeyEvent((e: KeyEvent) => { return this.handleKey(e); })
       }
       .layoutWeight(1)
       .height('100%')
+
+      // 分类下拉浮层：放在主体之后，浮在内容之上
+      if (this.showGroups && this.viewMode === VIEW_ALL && this.uiGroups.length > 1) {
+        this.groupDropdown()
+      }
     }
     .width('100%')
     .height('100%')

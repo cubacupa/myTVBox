@@ -46,6 +46,28 @@ const SCREEN_LONG_MS: number = 500;
 /** 控制栏自动隐藏延时 */
 const UI_HIDE_MS: number = 5000;
 
+/**
+ * 清掉字幕里的排版标记，只留文字。
+ * 夸克云端转码出来的 mov_text 字幕带着 `<font size="20">` 这类 HTML 标签，
+ * 原样贴到 Text 里会把标签当正文显示出来；ASS 转出来的则是 `{\an8}` 这种覆盖块。
+ */
+function cleanSub(t: string): string {
+  if (!t || t.length === 0) {
+    return '';
+  }
+  let s: string = t;
+  s = s.replace(/\{[^}]*\}/g, '');        // ASS/SSA 覆盖块 {\an8} {\pos(x,y)}
+  s = s.replace(/<[^>]*>/g, '');          // <font size="20"> <i> <c.yellow> </font>
+  s = s.replace(/\\N/g, '\n');            // ASS 换行
+  s = s.replace(/\\n/g, '\n');
+  s = s.replace(/\\h/g, ' ');
+  s = s.replace(/&nbsp;/g, ' ');
+  s = s.replace(/&amp;/g, '&');
+  s = s.replace(/&lt;/g, '<');
+  s = s.replace(/&gt;/g, '>');
+  return s.trim();
+}
+
 interface PlayerParams {
   url: string;
   title: string;
@@ -472,12 +494,17 @@ struct Player {
         if (g !== this.gen) {
           return;
         }
-        const t: string = info.text ?? '';
+        const t: string = cleanSub(info.text ?? '');
         hilog.info(DOMAIN, TAG, 'subtitle %{public}dms: %{public}s', info.startTime ?? 0,
           t.length > 60 ? t.substring(0, 60) : t);
         // 用户在菜单里关掉字幕后，引擎可能仍在推这条轨（部分机型 deselect 无效），
         // 这里直接丢弃，保证界面上真的不显示
         if (this.curSub < 0) {
+          this.subText = '';
+          return;
+        }
+        // 整条只有标记没有文字（`{\an8}` 独占一行之类），当作空档处理
+        if (t.length === 0) {
           this.subText = '';
           return;
         }

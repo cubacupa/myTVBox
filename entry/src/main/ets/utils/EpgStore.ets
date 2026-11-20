@@ -688,4 +688,26 @@ export class EpgStore {
     }
     return { cur: cur, next: next };
   }
+
+  /** 接下来 n 档节目（只看开始时间晚于现在的，正在播那档不算）；无数据返回空数组 */
+  static upcoming(id: string, name: string, n: number): EpgProg[] {
+    const ret: EpgProg[] = [];
+    if (!EpgStore.hasData() || n <= 0) {
+      return ret;
+    }
+    const c: EpgChan | null = EpgStore.chanOf(id, name);
+    if (c === null) {
+      return ret;
+    }
+    const now: number = Date.now();
+    for (const p of c.progs) {
+      if (p.s > now) {
+        ret.push(p);
+        if (ret.length >= n) {
+          break;
+        }
+      }
+    }
+    return ret;
+  }
 }

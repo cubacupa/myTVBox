@@ -2,10 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { FileStore } from './FileStore';
 
 const F_FAV: string = 'tvbox_live_fav.json';
-const F_SEEN: string = 'tvbox_live_seen.json';
 const F_LAST: string = 'tvbox_live_last.json';
-/** 已点记录只保留最近这么多个，避免文件越滚越大 */
-const SEEN_MAX: number = 600;
 /** 「最后能放的线路」最多记这么多个频道 */
 const LAST_MAX: number = 300;
 
@@ -29,16 +26,12 @@ interface LastRec {
 /**
  * 直播频道的两个小记忆：
  *   ① 收藏：频道名 + 地址 + 分组（地址是稳定标识，同名频道很多）
- *   ② 已点过：只要地址，用来给列表里的格子换色
- *
- * 采集源里大量频道是死的，点进去转两圈就报错；有了「点过」标记，
- * 下次能一眼避开，不用反复踩同一个坑。
+ *   ② 最后能放的线路：多线路频道记住上次真播出来的那条，避开串台/404
  *
  * 内存里各存一份（数组）：直播列表一屏上百个格子，每次都读文件会卡顿。
  */
 export class LiveMarkStore {
   private static favArr: LiveFav[] | null = null;
-  private static seenArr: string[] | null = null;
   private static lastCache: Map<string, string> = new Map();
   private static lastLoaded: boolean = false;
 
@@ -124,64 +117,10 @@ export class LiveMarkStore {
     return false;
   }
 
-  // ---------- 已点过 ----------
-
-  static seenList(ctx: common.Context): string[] {
-    if (LiveMarkStore.seenArr !== null) {
-      return LiveMarkStore.seenArr;
-    }
-    const out: string[] = [];
-    const txt: string = FileStore.readText(ctx, F_SEEN);
-    if (txt) {
-      try {
-        const arr = JSON.parse(txt) as string[];
-        if (Array.isArray(arr)) {
-          for (const u of arr) {
-            if (typeof u === 'string' && u.length > 0) {
-              out.push(u);
-            }
-          }
-        }
-      } catch (e) {
-        // 损坏当作空
-      }
-    }
-    LiveMarkStore.seenArr = out;
-    return out;
-  }
-
-  static isSeen(ctx: common.Context, url: string): boolean {
-    return LiveMarkStore.seenList(ctx).indexOf(url) >= 0;
-  }
-
-  /** 记一次「点过」。最近点的排最前，超出上限丢最旧的 */
-  static markSeen(ctx: common.Context, url: string): void {
-    if (!url) {
-      return;
-    }
-    const list: string[] = LiveMarkStore.seenList(ctx);
-    if (list.length > 0 && list[0] === url) {
-      return;
-    }
-    const next: string[] = [url];
-    for (const u of list) {
-      if (u !== url && next.length < SEEN_MAX) {
-        next.push(u);
-      }
-    }
-    LiveMarkStore.seenArr = next;
-    FileStore.writeText(ctx, F_SEEN, JSON.stringify(next));
-  }
-
-  /** 清空全部收藏（收藏视图右上角的「清除全部」用） */
+  /** 清空全部收藏（收藏视图右上角的「清空收藏」用） */
   static clearFavs(ctx: common.Context): void {
     LiveMarkStore.favArr = [];
     FileStore.remove(ctx, F_FAV);
-  }
-
-  static clearSeen(ctx: common.Context): void {
-    LiveMarkStore.seenArr = [];
-    FileStore.remove(ctx, F_SEEN);
   }
 
   // ---------- 最后能放的线路 ----------
