@@ -157,9 +157,11 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 > 鸿蒙 HAP **不能点击安装**，必须用 `hdc install -r <hap>` 或 DevEco Studio 安装。
 > 调试包绑定了你账号下登记的设备 UDID，换设备需要重新自动签名。
 
-### 一键更新到电视（Mac）
+### 一键更新到电视（Mac / Windows）
 
-首次按上面的步骤用 DevEco 自动签名一次（签名配置只在本机，不入库），之后在仓库目录跑：
+首次按上面的步骤用 DevEco 自动签名一次（签名配置只在本机，不入库），之后在仓库目录跑。两个脚本功能一样：拉代码 → 编译 → 覆盖安装，都不会启动 App、不会打断电视当前画面。电视需开「开发者模式 + 无线调试」，并与电脑在同一个局域网。
+
+**Mac**：
 
 ```bash
 ./scripts/update-tv.sh <电视IP>
@@ -168,8 +170,23 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 # --dry-run  只编译，不连接电视（自检用）
 ```
 
-脚本只做「拉代码 → 编译 → 覆盖安装」，不会启动 App、不会打断电视当前画面。
-电视需开「开发者模式 + 无线调试」，并与电脑在同一个局域网。
+**Windows（PowerShell）**：
+
+```powershell
+.\scripts\update-tv.ps1 <电视IP>
+# 例：.\scripts\update-tv.ps1 192.168.1.84
+# -NoPull    跳过拉代码，只编译推送
+# -DryRun    只编译，不连接电视（自检用）
+# -DevEco    DevEco 安装目录，默认 C:\Program Files\Huawei\DevEco Studio
+```
+
+Windows 首次运行若报「禁止运行脚本」，先在当前用户放开一次（的安全前提是你信任本仓库）：
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+DevEco 或 SDK 装在非默认位置时，用 `-DevEco` / `-SdkRoot` / `-JavaHome` / `-Hdc` 指定，脚本启动时会自动探测常见路径，找不到会明确告诉你缺哪个。
 
 ---
 
