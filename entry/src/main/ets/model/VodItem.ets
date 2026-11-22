@@ -16,6 +16,11 @@ export interface VodItem {
   // 之前没声明导致被丢弃。豆瓣 ID 覆盖率约 88%，评分覆盖率约 23%（新片未开分）。
   vod_douban_id?: string | number;
   vod_douban_score?: string | number;
+  /**
+   * 备选搜索片名。按名刮削时逐个试，谁命中用谁。
+   * 采集站不需要填；网盘发布名（点分隔）与其目录名各有一半线索时才用得上。
+   */
+  vod_search_names?: string[];
   // 列表接口（ac=videolist）也会带这几个字段，主推位直接拿来做简介，
   // 不用为了几行字再请求一次详情
   vod_content?: string;
@@ -40,6 +45,8 @@ export interface VodDetail {
   // 详情接口同样会带豆瓣字段，补上用于海报/评分刮削
   vod_douban_id?: string | number;
   vod_douban_score?: string | number;
+  /** 备选搜索片名，见 VodItem 同名注释 */
+  vod_search_names?: string[];
 }
 
 // 单集

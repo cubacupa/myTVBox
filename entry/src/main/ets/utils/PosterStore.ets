@@ -327,7 +327,20 @@ export class PosterStore {
     // 零宽字符 / 方向标记：站点的片名里确实混着 \u200b（"京城十二时辰第6季"），
     // 豆瓣搜索结果里又常见 \u200e（"卧龙‎ (2026)"），不剔掉搜索必挂
     s = s.replace(/[\u200B-\u200F\uFEFF]/g, '');
-    s = s.replace(/[（(【\[][^）)】\]]*[）)】\]]/g, ' ');
+    // 括号段不能无条件删：网盘/字幕组常把片名写在 [] 里（"[记我的母亲][2012][1080P]"），
+    // 整段删完只剩年份，海报永远刮不到。只删「纯技术/数字/年份」的括号段，
+    // 含中文或字母片名的保留下来，交给下面的词表去掉画质/语言词。
+    s = s.replace(/[（(【\[][^）)】\]]*[）)】\]]/g, (seg: string): string => {
+      const inner: string = seg.substring(1, seg.length - 1).trim();
+      if (inner.length === 0) {
+        return ' ';
+      }
+      // 去掉纯画质/语言/年份/纯数字段；含中文或成词英文的一律保留
+      const stripped: string = inner.replace(
+        /(日语中字|中文字幕|国语|粤语|中字|双语|简繁|繁体|高清|超清|蓝光|4K|1080P|2160P|720P|HDR|(?:19|20)\d{2}|\d+[GgMmKk]?|[A-Za-z0-9\-_. ]+)/g,
+        '').trim();
+      return stripped.length > 0 ? ' ' + stripped + ' ' : ' ';
+    });
     s = s.replace(
       /(国语|粤语|英语|日语|韩语|中字|中文字幕|双语|无删减|未删减|导演剪辑版|高清|超清|蓝光|完整版|抢先版|HD|BD|DVD|TS|TC|4K|1080P|2160P|720P|HDR|杜比视界|更新至第?\d+集?|全\d+集|共\d+集|完结)/gi,
       ' ');
@@ -403,6 +416,8 @@ export class PosterStore {
   /**
    * 缓存 key：剧名哈希 + 季号后缀（q3 = 第 3 季）。
    * 前缀 n3 是「片名缓存版本」，每次"按名匹配"的判定规则有实质改动就 +1：
+   *   n3 → n4（2026-11-22）：cleanTitle 不再整段删除方括号，含片名的 "[记我的母亲]"
+   *   会保留；同批改了网盘备选片名搜索。旧 key 对应的图是按错名刮的，整代作废重刮。
    *   n2 → n3（2026-11-17）：Kazumi 规则站以前没把 vod_year 传进来，按名刮到的封面/剧照
    *   全是"同名但不同片"的错图（番剧《来自远方》被配成 2021 美国歌舞片，连 9.2 分一起错）。
    *   错图已经落盘，没法逐条判断对错，只能整代 key 作废重刮；
@@ -414,7 +429,7 @@ export class PosterStore {
     if (base.length === 0) {
       return '';
     }
-    const k: string = 'n3' + PosterStore.hashName(PosterStore.squash(base));
+    const k: string = 'n4' + PosterStore.hashName(PosterStore.squash(base));
     const sn: number = PosterStore.seasonOf(full);
     return sn > 0 ? k + 'q' + sn.toString() : k;
   }
@@ -537,6 +552,14 @@ export class PosterStore {
     let added: number = 0;
     for (let i = 0; i < items.length; i++) {
       const it: VodItem = items[i];
+      // 网盘文件夹（AlistApi 用 dir: 前缀 + 📁 名字）不是片子，别塞进搜索队列：
+      // 一屏几十个文件夹会把 NAME_QUEUE_MAX=60 占满，真正的影片永远排不上。
+      if (typeof it.vod_id === 'string' && (it.vod_id as string).startsWith('dir:')) {
+        continue;
+      }
+      if ((it.vod_name ?? '').startsWith('📁')) {
+        continue;
+      }
       // 先登记年份占用，再算有效 key / 查本地缓存——顺序反了会让同名不同年的片
       // 都拿到基础 key，后到的图覆盖先到的。登记只在入队路径发生，每 key 一次。
       PosterStore.registerYear(it);
@@ -752,7 +775,22 @@ export class PosterStore {
       if (noYear.length > 0 && tries.indexOf(noYear) < 0) {
         tries.push(noYear);
       }
+      // 网盘源专用：文件名解析出的英文原名 / 目录名里的中文原名。
+      // 规避名（"可F的爱"）和点分隔发布名（"Possible.Love.2026.2160p..."）
+      // 单独搜都是 0 条，但换成另一条路的名字就能命中，追加到末尾依次试。
+      const alts: string[] | undefined = item.vod_search_names;
+      if (alts !== undefined) {
+        for (let a = 0; a < alts.length; a++) {
+          const alt: string = PosterStore.cleanTitle(alts[a]);
+          if (alt.length > 0 && tries.indexOf(alt) < 0) {
+            tries.push(alt);
+          }
+        }
+      }
       let cands: SuggestTarget[] = [];
+      // 用哪个词搜到的，就得用那个词比对：网盘源备选名（英文原名/中文原名）
+      // 跟 item.vod_name（规避名）字面完全不同，拿 raw 去 pick 会把命中结果全部否掉。
+      let matchedQuery: string = tries[0];
       for (let i = 0; i < tries.length; i++) {
         if (i > 0) {
           // 换写法重试也要留空隙：连着三次请求比"一条一条慢慢来"更容易触发风控
@@ -760,6 +798,7 @@ export class PosterStore {
         }
         cands = await PosterStore.lookup(tries[i]);
         if (cands.length > 0) {
+          matchedQuery = tries[i];
           break;
         }
       }
@@ -774,7 +813,7 @@ export class PosterStore {
         return;
       }
       PosterStore.noteRows();
-      let hit: SuggestTarget | null = PosterStore.pick(cands, raw, year);
+      let hit: SuggestTarget | null = PosterStore.pick(cands, matchedQuery, year);
       // 年份没对上就再补搜一次「片名+年份」。
       // 豆瓣会把同名重名片直接标进标题（《荒岛惊魂2018》就是独立条目 30320177），
       // 只搜「荒岛惊魂」只能拿到 1966 / 2005 那两部，于是中国的 2018 片被配成美国片。
@@ -1145,9 +1184,51 @@ export class PosterStore {
       }
     }
     // 最后一档：忽略连接词后再比。
-    // 实例：采集站片名带「&」而豆瓣片名用「和」，去掉标点后两种写法仍差一个连接词，
-    // 前面几档全部对不上，海报就永远刮不到。
-    return PosterStore.scanLoose(list, wBase, wSeason, y);
+    // 实例：《爱、死亡 & 机器人第四季》在豆瓣叫《爱，死亡和机器人 第四季》，
+    // 站点写法去掉标点后是「爱死亡机器人第四季」，豆瓣是「爱死亡和机器人第四季」，
+    // 字面永远差一个「和」，前面几档全部对不上，海报就永远刮不到。
+    const joined: SuggestTarget | null = PosterStore.scanLoose(list, wBase, wSeason, y);
+    if (joined !== null) {
+      return joined;
+    }
+    // 跨语言命中：网盘片名是英文原名（"Possible Love" / "A City of Sadness"），
+    // 豆瓣 suggest 返回的是中文译名（"可能的爱" / "悲情城市"），字面永远对不上，
+    // 前面所有档都会否掉——表现就是"发布名洗干净了、豆瓣也命中了、海报还是不出"。
+    // 放宽条件：纯拉丁字母的查询词，候选只有一条、或只有一条年份吻合，就采纳。
+    // 这是有年份约束的单条精确命中，错配风险低；多条同名又对不上年份的仍放弃。
+    return PosterStore.pickTranslated(list, wBase, y, wSeason);
+  }
+
+  /**
+   * 英文原名 → 中文译名的兜底匹配。
+   * want 必须是纯拉丁字母/数字（网盘发布名洗出来的英文原名），
+   * 中文片名不参与，避免把中文站的普通片靠这条路径错配。
+   */
+  private static pickTranslated(list: SuggestTarget[], want: string, y: string,
+    wSeason: number): SuggestTarget | null {
+    if (want.length === 0 || !/^[a-z0-9\s]+$/i.test(want)) {
+      return null;
+    }
+    let yearHit: SuggestTarget | null = null;
+    let yearCount: number = 0;
+    for (let i = 0; i < list.length; i++) {
+      const cy: string = (list[i].year ?? '').trim();
+      if (y.length > 0 && cy === y) {
+        yearHit = list[i];
+        yearCount++;
+      }
+    }
+    if (yearHit !== null && yearCount === 1) {
+      return yearHit;
+    }
+    // 没有年份线索时，唯一的候选可采纳；多条同名不敢猜
+    if (y.length === 0 && list.length === 1) {
+      const cs: number = PosterStore.seasonOf(list[0].title ?? '');
+      if (wSeason === 0 || cs === wSeason) {
+        return list[0];
+      }
+    }
+    return null;
   }
 
   /** 去掉连接词，只用于"宽松比对"，不参与缓存 key */
@@ -1210,8 +1291,8 @@ export class PosterStore {
         continue;
       }
       // 季号不同就是不同的条目，不算「同名歧义」。
-      // 合集剧搜出来往往是 1/2/3/4 季各一条，
-      // 以前把四季都算进歧义，于是这些片永远被跳过、永远没海报。
+      // 《爱、死亡 & 机器人第四季》搜出来是 1/2/3/4 四季各一条，
+      // 以前把四季都算进歧义，于是这部片永远被跳过、永远没海报。
       if (wSeason > 0 && PosterStore.seasonOf(t) !== wSeason) {
         continue;
       }

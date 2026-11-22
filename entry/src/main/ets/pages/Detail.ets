@@ -73,7 +73,8 @@ struct Detail {
       vod_id: this.vodId,
       vod_name: this.name,
       vod_pic: this.pic,
-      vod_douban_id: this.doubanId
+      vod_douban_id: this.doubanId,
+      vod_year: this.year
     };
     return it;
   }
