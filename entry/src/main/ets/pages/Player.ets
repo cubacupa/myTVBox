@@ -1,5 +1,6 @@
 import { router } from '@kit.ArkUI';
 import { media } from '@kit.MediaKit';
+import { image } from '@kit.ImageKit';
 import { KeyCode } from '@kit.InputKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -258,6 +259,23 @@ struct Player {
   private gen: number = 0;
   /** 连接看门狗：prepare 卡住时 AVPlayer 可能几十秒都不报错 */
   private watchdog: number = -1;
+  /**
+   * 「连接中」遮罩延时显示，借鉴 Bolt-IPTV 的 TuneReason：
+   * 用户主动换台/换线时先保持上一帧，500ms 还没画面才弹遮罩；
+   * 首次进入 / 错误重试 300ms 就弹，避免长时间纯黑让人以为按错了。
+   */
+  @State showConnecting: boolean = false;
+  private connectUiTimer: number = -1;
+  /** 本次起播原因：boot / user / error，只用于遮罩策略与日志 */
+  private tuneReason: string = 'boot';
+  /** 同一条线路的错误重试次数（成功起播后归零），先重试再换线 */
+  private sameLineRetries: number = 0;
+  /**
+   * 换线路/切集时冻结的最后一帧，盖在 XComponent 上当封面。
+   * XComponent 是独立 surface，componentSnapshot 抓不到，必须走
+   * image.createPixelMapFromSurfaceSync(this.surfaceId)。
+   */
+  @State freezeFrame: image.PixelMap | null = null;
 
   aboutToAppear(): void {
     const p = router.getParams() as PlayerParams;
@@ -339,12 +357,13 @@ struct Player {
     return '';
   }
 
-  private async prepareAndStart(): Promise<void> {
+  private async prepareAndStart(reason: string = 'boot'): Promise<void> {
     if (this.isLive && this.linePos >= 0 && this.linePos < this.liveUrls.length) {
       // 换线路时也走这里：当前线路地址就是这次要播的地址
       this.rawUrl = this.liveUrls[this.linePos];
     }
     this.connecting = true;
+    this.markTune(reason);
     if (!this.isLive && this.ctx !== null && this.progId) {
       this.savedProgress = await PlayProgress.get(this.ctx, this.progId);
       // 每次起播都记一笔：详情页据此把看过的集标暗、把最近一集标出来。
@@ -463,6 +482,9 @@ struct Player {
           this.errMsg = '';
           this.isPlaying = true;
           this.connecting = false;
+          this.clearTune();          // 画面已出：撤掉还没弹的连接遮罩
+          this.clearFreeze();        // 新画面接管，撤掉冻结封面
+          this.sameLineRetries = 0;  // 这条线路成了，清零同线重试
           this.clearWatchdog();
           this.rememberLine();
         } else if (state === 'paused' || state === 'completed'
@@ -995,6 +1017,16 @@ struct Player {
    */
   private onPlayFail(url: string, msg: string, code: string): void {
     this.clearWatchdog();
+    // 直播：同一条线路先原地重连一次再换线。真机上大量「连不上」只是这一次
+    // TCP 连接废了，重连即恢复；没撬动就按原来的顺序自动换下一条。
+    if (this.isLive && this.sameLineRetries < 1) {
+      this.sameLineRetries++;
+      this.showTip('这次连接没成功，重连一次…');
+      hilog.info(DOMAIN, TAG, 'retry same line %{public}d/%{public}d',
+        this.linePos + 1, this.liveUrls.length);
+      this.restartAt(this.linePos, false, 'error');
+      return;
+    }
     if (this.isLive && this.liveUrls.length > 1
       && this.autoTried < this.liveUrls.length - 1) {
       this.autoTried++;
@@ -1006,6 +1038,7 @@ struct Player {
     }
     this.connecting = false;
     this.resolving = false;
+    this.clearFreeze();   // 全部线路都失败：错误信息盖上去，封面没意义了
     this.errMsg = '播放出错：' + msg + (code.length > 0 ? '（code ' + code + '）' : '') + '\n'
       + '地址：' + url + '\n'
       + (this.isLive
@@ -1014,7 +1047,7 @@ struct Player {
   }
 
   /** 换成第 pos 条线路重新起播 */
-  private restartAt(pos: number, manual: boolean): void {
+  private restartAt(pos: number, manual: boolean, reason: string = ''): void {
     if (pos < 0 || pos >= this.liveUrls.length) {
       return;
     }
@@ -1022,7 +1055,10 @@ struct Player {
     this.lineNo = pos + 1;
     if (manual) {
       this.autoTried = 0;
+      this.sameLineRetries = 0;
     }
+    this.markTune(reason.length > 0 ? reason : (manual ? 'user' : 'error'));
+    this.freezeLastFrame();   // 必须在 releasePlayer 前抓，否则 surface 已空
     this.releasePlayer();
     // 整族「准备状态」都要重置，否则 inited/prepareCalled 这些幂等守卫
     // 会把第二次初始化直接挡掉，表现为换线路后永远黑屏
@@ -1056,7 +1092,7 @@ struct Player {
     if (!this.isLive || this.liveUrls.length <= 1) {
       return;
     }
-    this.restartAt((this.linePos + 1) % this.liveUrls.length, true);
+    this.restartAt((this.linePos + 1) % this.liveUrls.length, true, 'user');
     this.showTip('线路 ' + this.lineNo + '/' + this.lineCount);
   }
 
@@ -1072,6 +1108,20 @@ struct Player {
    * 切集后旧实例的代次已过期，它的回调进不来，所以不会一跳两集。
    */
   private onCompleted(): void {
+    if (this.isLive) {
+      // 直播流不存在「播完」：completed 就是断流。Bolt-IPTV 把 STATE_ENDED
+      // 当断流处理，这里按同一套自救重连，1.5s 去重挡住重复上报。
+      const t: number = Date.now();
+      if (t - this.completedTs < 1500) {
+        return;
+      }
+      this.completedTs = t;
+      hilog.warn(DOMAIN, TAG, 'live stream ended, treat as disconnect');
+      // 开源版没有私有版的 recoverLiveStall，直接交给 onPlayFail：
+      // 它会先同线路重连一次，再按序自动换线，同样有次数上限。
+      this.onPlayFail(this.rawUrl, '直播流中断', 'ENDED');
+      return;
+    }
     if (this.completedFired) {
       return;                 // 本集只认一次：兜底轮询会反复进来
     }
@@ -1122,6 +1172,7 @@ struct Player {
     this.cancelSeek();            // 切集时丢弃未松手的预览，别拿上一集的时间去跳
     this.saveProgress();          // 先把当前集的进度落盘，再换
     this.completedFired = false;  // 新的一集要重新允许「播完自动接下一集」
+    this.freezeLastFrame();       // 切集同样保留上一帧，别黑屏
     this.releasePlayer();
     this.epIdx = idx;
     this.inited = false;
@@ -1131,6 +1182,7 @@ struct Player {
     this.started = false;
     this.isPlaying = false;
     this.connecting = true;
+    this.markTune('user');
     this.errMsg = '';
     this.resolving = false;
     this.durTime = 0;
@@ -1155,7 +1207,7 @@ struct Player {
     this.showTip((auto ? '自动播放 ' : '') + '第 ' + (idx + 1) + '/' + this.epCount + ' 集');
     hilog.info(DOMAIN, TAG, 'switch ep %{public}d/%{public}d (auto=%{public}s)',
       idx + 1, this.epCount, String(auto));
-    this.prepareAndStart();
+    this.prepareAndStart(auto ? 'error' : 'user');
   }
 
   private releasePlayer(): void {
@@ -1219,6 +1271,73 @@ struct Player {
     if (this.watchdog !== -1) {
       clearTimeout(this.watchdog);
       this.watchdog = -1;
+    }
+  }
+
+  /** 标记一次起播：取消上一个遮罩定时器，按原因决定多久后才允许弹「连接中」 */
+  private markTune(reason: string): void {
+    this.tuneReason = reason;
+    if (this.connectUiTimer !== -1) {
+      clearTimeout(this.connectUiTimer);
+      this.connectUiTimer = -1;
+    }
+    this.showConnecting = false;
+    const delay: number = reason === 'user' ? 500 : 300;
+    this.connectUiTimer = setTimeout(() => {
+      this.connectUiTimer = -1;
+      if (this.connecting && this.errMsg.length === 0) {
+        this.showConnecting = true;
+      }
+    }, delay) as number;
+  }
+
+  /** 画面已经出来（或失败收口）：遮罩与定时器都清掉 */
+  private clearTune(): void {
+    if (this.connectUiTimer !== -1) {
+      clearTimeout(this.connectUiTimer);
+      this.connectUiTimer = -1;
+    }
+    this.showConnecting = false;
+  }
+
+  /**
+   * 换线路前把 surface 上最后一帧抓下来当封面。
+   * 必须在 releasePlayer() 之前调用——播放器一释放，surface 内容就没了。
+   * 抓不到（还没起播、surface 已失效、机型不支持）就静默跳过，不影响换线。
+   */
+  private freezeLastFrame(): void {
+    const sid: string = this.surfaceId.length > 0
+      ? this.surfaceId : this.xcController.getXComponentSurfaceId();
+    if (sid.length === 0) {
+      return;
+    }
+    try {
+      const pm: image.PixelMap = image.createPixelMapFromSurfaceSync(sid);
+      const old: image.PixelMap | null = this.freezeFrame;
+      this.freezeFrame = pm;
+      if (old !== null) {
+        try {
+          old.release();
+        } catch (e) {
+          // 旧封面释放失败无所谓，不挡新封面显示
+        }
+      }
+      hilog.info(DOMAIN, TAG, 'froze last frame for seamless switch');
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'freeze frame skipped: %{public}s', (e as Error).message);
+    }
+  }
+
+  /** 新画面已经出来：撤掉冻结封面 */
+  private clearFreeze(): void {
+    const old: image.PixelMap | null = this.freezeFrame;
+    this.freezeFrame = null;
+    if (old !== null) {
+      try {
+        old.release();
+      } catch (e) {
+        // 忽略
+      }
     }
   }
 
@@ -1936,6 +2055,8 @@ struct Player {
     PosterStore.resume();
     RatingStore.resume();
     this.clearWatchdog();
+    this.clearTune();
+    this.clearFreeze();
     this.gen++;
     // 离场就停掉后台下载，别让它在后台白跑流量
     LocalPrefetch.cancel();
@@ -2212,6 +2333,17 @@ struct Player {
         .width(this.actualSize && this.videoW > 0 ? this.videoW + 'px' : '100%')
         .height(this.actualSize && this.videoH > 0 ? this.videoH + 'px' : '100%')
 
+      // 换线路/切集期间盖住最后一帧，避免黑屏；新画面 playing 后撤掉。
+      // 不拦截点击，控制层的显隐/按钮照常工作。
+      if (this.freezeFrame !== null) {
+        Image(this.freezeFrame)
+          .width(this.actualSize && this.videoW > 0 ? this.videoW + 'px' : '100%')
+          .height(this.actualSize && this.videoH > 0 ? this.videoH + 'px' : '100%')
+          .objectFit(ImageFit.ScaleDown)
+          .focusable(false)
+          .hitTestBehavior(HitTestMode.None)
+      }
+
       // 全局控制层：片名 + 状态 + 进度条 + 按钮
       Column() {
         Row() {
@@ -2258,8 +2390,9 @@ struct Player {
             .backgroundColor('#00000088')
             .borderRadius(8)
             .margin({ bottom: 140 })
-        } else if (this.connecting) {
-          // 解析完成但还没播起来：这里以前会落到「已暂停」，看着像自己按错了
+        } else if (this.connecting && this.showConnecting) {
+          // 连接中遮罩延时出现：主动换台时先留着上一帧，不整屏闪一下。
+          // 这里以前会落到「已暂停」，看着像自己按错了。
           Column() {
             LoadingProgress().width(50).height(50)
             Text(this.fetchPct >= 0
@@ -2273,7 +2406,8 @@ struct Player {
                 .fontColor('#bbbbbb').fontSize(13).margin({ top: 6 })
             }
           }.margin({ bottom: 140 })
-        } else if (!this.isPlaying) {
+        } else if (!this.isPlaying && !this.connecting) {
+          // connecting 但遮罩还没到点：保持上一帧，别误显示「已暂停」
           Column() {
             Text('❚❚').fontSize(44).fontColor('#ffffff')
             Text('已暂停 · 点下方播放按钮继续').fontColor('#ffffff').fontSize(16)
