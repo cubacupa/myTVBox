@@ -89,7 +89,7 @@ export class LiveApi {
       if (urls.length === 0) {
         continue;
       }
-      const key: string = cur.name + '|' + name;
+      const key: string = cur.name + '|' + LiveApi.normId(name);
       let ch = index.get(key);
       if (ch === undefined) {
         ch = { id: name, name: name, url: '', logo: '', lines: [] };
@@ -102,6 +102,9 @@ export class LiveApi {
     }
     if (cur.channels.length > 0) {
       groups.push(cur);
+    }
+    for (const g of groups) {
+      LiveApi.sortChannels(g.channels);
     }
     return groups;
   }
@@ -150,7 +153,7 @@ export class LiveApi {
         gmap.set(group, g);
         groups.push(g);
       }
-      const key: string = group + '|' + cid;
+      const key: string = group + '|' + LiveApi.normId(cid);
       let ch = cmap.get(key);
       if (ch === undefined) {
         ch = { id: cid, name: chName, url: '', logo: logo, lines: [] };
@@ -160,7 +163,51 @@ export class LiveApi {
       LiveApi.pushLine(ch, '', line);
       name = '';
     }
+    for (const g of groups) {
+      LiveApi.sortChannels(g.channels);
+    }
     return groups;
+  }
+
+  /**
+   * 频道身份归一：同一台在源里常写成 CCTV-13 / CCTV13 / cctv_13 / 中央13台/
+   * 央视13 等多种形式，不归一就会被当成两个频道（用户看到「两个中央13台」）。
+   * 只做保守归一：统一大小写、去掉横杠/下划线/空格、把常见前缀（cctv/中央/央视）
+   * 和中文数字后缀「台」「频道」剥掉；其他字符原样保留，避免 CCTV-5 与
+   * CCTV-5+ 体育 被误并成一个。
+   */
+  private static normId(s: string): string {
+    let x: string = (s ?? '').trim().toLowerCase();
+    x = x.replace(/[-_\s]/g, '');
+    x = x.replace(/^(cctv|中央|央视)/, '');
+    x = x.replace(/(台|频道)$/, '');
+    // 剥完变空说明名字不符合 cctv 模式，退回原文，免得一批怪名字全并成一个
+    return x.length > 0 ? x : (s ?? '').trim().toLowerCase();
+  }
+
+  /** 从频道名里取第一个数字，用于自然排序：CCTV-11 → 11，中央13台 → 13 */
+  private static chanNum(s: string): number {
+    const m = /\d+/.exec(s ?? '');
+    return m === null ? Number.MAX_VALUE : parseInt(m[0], 10);
+  }
+
+  /**
+   * 每组内按频道号数字排：1,2,3…10,11，而不是 1,10,11,2 的字典序。
+   * 都没数字的频道（地方台、卫视）保持源里的原顺序，不按拼音重排，
+   * 免得用户熟悉的频道顺序被打乱。
+   */
+  private static sortChannels(list: LiveChannel[]): void {
+    list.sort((a: LiveChannel, b: LiveChannel): number => {
+      const na: number = LiveApi.chanNum(a.name);
+      const nb: number = LiveApi.chanNum(b.name);
+      if (na === Number.MAX_VALUE && nb === Number.MAX_VALUE) {
+        return 0;
+      }
+      if (na !== nb) {
+        return na - nb;
+      }
+      return a.name.localeCompare(b.name);
+    });
   }
 
   /** 加一条线路：去重，顺手补上 ch.url */
