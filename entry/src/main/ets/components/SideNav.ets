@@ -16,8 +16,44 @@ export struct SideNav {
   @Prop active: number = 0;
   @State navFocus: number = -1;
   @State navHover: number = -1;
+  /** 橙色胶囊的 y（相对 nav 栏顶部）。跨页用 AppStorage 记住旧位置，切页时从旧位滑到新位 */
+  @State capY: number = -1;
+  /** nav 根组件、active 项各自的窗口 y，相减得胶囊在栏内的位置 */
+  private navTopY: number = -1;
+  private activeGlobalY: number = -1;
+  /** 当前页是否已经滑过一次 */
+  private capInited: boolean = false;
   /** 首页用于自己吞掉点击（当前页不重复跳转） */
   onHome: () => void = () => {};
+
+  aboutToAppear(): void {
+    const saved: number | undefined = AppStorage.get<number>('navCapY');
+    this.capY = (saved !== undefined && saved >= 0) ? saved : -1;
+    this.navTopY = -1;
+    this.activeGlobalY = -1;
+    this.capInited = false;
+  }
+
+  /**
+   * nav 根与 active 项都测到 y 后才定位胶囊。首帧先落在上一页的旧位置，
+   * 再动画滑过来——不是直接闪到新位置。两个测量谁先到都要等另一个。
+   */
+  private resolveCap(): void {
+    if (this.capInited || this.navTopY < 0 || this.activeGlobalY < 0) {
+      return;
+    }
+    this.capInited = true;
+    const y: number = this.activeGlobalY - this.navTopY;
+    const oldY: number | undefined = AppStorage.get<number>('navCapY');
+    if (oldY !== undefined && oldY >= 0 && Math.abs(oldY - y) > 1) {
+      animateTo({ duration: 260, curve: Curve.EaseOut }, () => {
+        this.capY = y;
+      });
+    } else {
+      this.capY = y;
+    }
+    AppStorage.setOrCreate<number>('navCapY', y);
+  }
 
   private go(i: number): void {
     if (i === this.active) {
@@ -105,15 +141,19 @@ export struct SideNav {
       .width(52)
       .height(52)
       .borderRadius(17)
-      .backgroundColor(this.active === i ? '#FF8A3D'
-        : (this.on(i) ? '#1FFFFFFF' : Color.Transparent))
-      // 阴影只做「灯下有一点晕」的暗示：原来 radius 26 / offsetY 8 会撑到相邻两项的地盘上，
-      // 在 88 宽的窄栏里看着就像被切掉一块，压到 14 后刚好落在方块自己周围
+      // 橙色胶囊已提成浮层滑动，这里只留焦点/悬停的浅底；active 的底交给浮层
+      .backgroundColor(this.on(i) && this.active !== i ? '#1FFFFFFF' : Color.Transparent)
       .shadow({
-        radius: this.active === i ? 14 : (this.on(i) ? 10 : 0),
-        color: this.active === i ? '#4DFF8A3D' : '#1AFFFFFF',
+        radius: this.on(i) && this.active !== i ? 10 : 0,
+        color: '#1AFFFFFF',
         offsetX: 0,
-        offsetY: this.active === i ? 4 : 3
+        offsetY: 3
+      })
+      .onAreaChange((_old: Area, nw: Area) => {
+        if (i === this.active) {
+          this.activeGlobalY = Number(nw.globalPosition.y);
+          this.resolveCap();
+        }
       })
 
       Text(this.labelOf(i))
@@ -141,6 +181,24 @@ export struct SideNav {
 
   build() {
     Column() {
+      // 滑动胶囊浮层：第一个子组件，z 序最低，沉在导航项图标底下——图标才能透出来。
+      // 绝对定位到 active 项，切页时从旧 y 滑到新 y；不拦截点击。
+      if (this.capY >= 0) {
+        Column()
+          .width(52)
+          .height(52)
+          .borderRadius(17)
+          .backgroundColor('#FF8A3D')
+          .shadow({
+            radius: 14,
+            color: '#4DFF8A3D',
+            offsetX: 0,
+            offsetY: 4
+          })
+          .position({ x: 18, y: this.capY })
+          .hitTestBehavior(HitTestMode.None)
+      }
+
       // 品牌标识：与桌面图标同一套橙黄渐变播放三角，透明底直接压在深色侧栏上。
       // 不再套橙色方块底和辉光，两层橙色叠在一起会糊成一片。
       Stack() {
@@ -176,5 +234,11 @@ export struct SideNav {
     .height('100%')
     .backgroundColor('#08FFFFFF')
     .border({ width: { right: 1 }, color: '#12FFFFFF' })
+    .onAreaChange((_old: Area, nw: Area) => {
+      if (this.navTopY < 0) {
+        this.navTopY = Number(nw.globalPosition.y);
+        this.resolveCap();
+      }
+    })
   }
 }
