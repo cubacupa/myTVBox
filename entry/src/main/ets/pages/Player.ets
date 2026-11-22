@@ -11,6 +11,7 @@ import { PlayUrlResolver } from '../utils/PlayUrlResolver';
 import { PosterStore } from '../utils/PosterStore';
 import { RatingStore } from '../utils/RatingStore';
 import { LiveMarkStore } from '../utils/LiveMarkStore';
+import { PlayErrorText } from '../utils/PlayErrorText';
 import { LocalPrefetch } from '../utils/LocalPrefetch';
 import { MkvTracks, MkvTrack } from '../utils/MkvTracks';
 import { AppState } from '../utils/AppState';
@@ -1039,11 +1040,13 @@ struct Player {
     this.connecting = false;
     this.resolving = false;
     this.clearFreeze();   // 全部线路都失败：错误信息盖上去，封面没意义了
-    this.errMsg = '播放出错：' + msg + (code.length > 0 ? '（code ' + code + '）' : '') + '\n'
-      + '地址：' + url + '\n'
+    hilog.error(DOMAIN, TAG, 'play failed for good: %{public}s (code %{public}s) %{public}s',
+      msg, code, url);
+    this.errMsg = PlayErrorText.classify(msg, code) + '\n'
       + (this.isLive
-        ? '这个频道的 ' + this.liveUrls.length + ' 条线路都试过了，返回换个频道试试'
-        : '可返回上一页换一条线路，或换一个站点再试');
+        ? '返回换个频道试试'
+        : '返回换一条线路，或换一个站点再试')
+      + (code.length > 0 ? '\n诊断：code ' + code : '');
   }
 
   /** 换成第 pos 条线路重新起播 */

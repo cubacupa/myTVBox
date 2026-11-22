@@ -6,6 +6,7 @@ import { ApiStore, SavedApi } from '../utils/ApiStore';
 import { BuiltinConfig } from '../utils/BuiltinConfig';
 import { SiteCfg, RepoCfg, RepoScanResult, LiveCfg } from '../model/TvBoxModels';
 import { LiveSrcProbe } from '../utils/LiveSrcProbe';
+import { SourceProbe, ProbeTarget } from '../utils/SourceProbe';
 import { MySitesStore } from '../utils/MySitesStore';
 import { PinStore } from '../utils/PinStore';
 import { DoubanAuth } from '../utils/DoubanAuth';
@@ -80,6 +81,9 @@ struct Settings {
   @State repos: RepoCfg[] = [];
   @State rows: RepoScanResult[] = [];
   @State scanning: boolean = false;
+  @State probeBusy: boolean = false;
+  @State probeTick: number = 0;
+  @State sortByLatency: boolean = false;
   @State scanTip: string = '';
   @State repoName: string = '';
   @State curKey: string = '';
@@ -185,6 +189,113 @@ struct Settings {
     }
     this.rows = out;
     this.scanTip = '';
+  }
+
+  // ---------- 源接口体检 ----------
+
+  /** 体检范围：地址簿 + 当前点播站点 + 当前直播源 + 多仓仓库 */
+  private probeTargets(): ProbeTarget[] {
+    const out: ProbeTarget[] = [];
+    for (const a of this.saved) {
+      out.push({ url: a.url, name: a.name });
+    }
+    for (const s of this.sites) {
+      out.push({ url: s.api, name: s.name });
+    }
+    for (const l of this.lives) {
+      out.push({ url: l.url, name: l.name });
+    }
+    for (const r of this.rows) {
+      out.push({ url: r.url, name: r.name });
+    }
+    return out;
+  }
+
+  private async probeSources(): Promise<void> {
+    if (SourceProbe.isRunning()) {
+      return;
+    }
+    this.probeBusy = true;
+    this.probeTick++;
+    this.say('正在体检，完成后会显示响应耗时');
+    await SourceProbe.run(this.probeTargets());
+    this.probeBusy = false;
+    this.probeTick++;
+    this.refreshSourceLists();
+    this.say('体检完成');
+  }
+
+  /** 只重测失败项：成功的耗时不动，省流量也省时间 */
+  private async retryFailed(): Promise<void> {
+    SourceProbe.clearFailed();
+    await this.probeSources();
+  }
+
+  /** 结果在静态缓存里，换数组引用让 ForEach 重画 */
+  private refreshSourceLists(): void {
+    this.saved = this.saved.slice();
+    this.sites = this.sites.slice();
+    this.lives = this.lives.slice();
+    this.rows = this.rows.slice();
+  }
+
+  private toggleSort(): void {
+    this.sortByLatency = !this.sortByLatency;
+    this.refreshSourceLists();
+  }
+
+  private probeLabel(url: string): string {
+    // 读一下 tick，让体检完成后的 @State 变化把这段文本一起重画
+    const tick: number = this.probeTick;
+    return tick >= 0 ? SourceProbe.label(url) : '';
+  }
+
+  private sortedSaved(): SavedApi[] {
+    if (!this.sortByLatency) {
+      return this.saved;
+    }
+    const arr: SavedApi[] = this.saved.slice();
+    arr.sort((a: SavedApi, b: SavedApi): number => {
+      const ra: number = SourceProbe.rank(a.url), rb: number = SourceProbe.rank(b.url);
+      if (ra !== rb) {
+        return ra - rb;
+      }
+      const la: number = SourceProbe.latency(a.url), lb: number = SourceProbe.latency(b.url);
+      return la === lb ? 0 : (la < lb ? -1 : 1);
+    });
+    return arr;
+  }
+
+  private sortedSites(): SiteCfg[] {
+    if (!this.sortByLatency) {
+      return this.sites;
+    }
+    const arr: SiteCfg[] = this.sites.slice();
+    arr.sort((a: SiteCfg, b: SiteCfg): number => {
+      const ra: number = SourceProbe.rank(a.api), rb: number = SourceProbe.rank(b.api);
+      if (ra !== rb) {
+        return ra - rb;
+      }
+      const la: number = SourceProbe.latency(a.api), lb: number = SourceProbe.latency(b.api);
+      return la === lb ? 0 : (la < lb ? -1 : 1);
+    });
+    return arr;
+  }
+
+  private sortedLives(): LiveCfg[] {
+    if (!this.sortByLatency) {
+      return this.lives;
+    }
+    const arr: LiveCfg[] = this.lives.slice();
+    arr.sort((a: LiveCfg, b: LiveCfg): number => {
+      const ra: number = SourceProbe.rank(a.url), rb: number = SourceProbe.rank(b.url);
+      if (ra !== rb) {
+        return ra - rb;
+      }
+      const la: number = SourceProbe.latency(a.url), lb: number = SourceProbe.latency(b.url);
+      return la === lb ? 0 : (la < lb ? -1 : 1);
+    });
+    return arr;
   }
 
   // ---------- 手机扫码推送 ----------
@@ -1025,7 +1136,26 @@ struct Settings {
               Column() {
                 if (this.saved.length > 0) {
                   this.section('已保存的接口')
-                  ForEach(this.saved, (a: SavedApi, idx: number) => {
+                  Row() {
+                    Button(this.probeBusy ? '体检中…' : '体检')
+                      .height(34).fontSize(12)
+                      .fontColor(this.probeBusy ? '#8E8E9A' : '#150A04')
+                      .backgroundColor(this.probeBusy ? '#232530' : '#FF8A3D')
+                      .borderRadius(9)
+                      .onClick(() => { this.probeSources(); })
+                    Button(this.sortByLatency ? '按耗时 ✓' : '按耗时')
+                      .height(34).fontSize(12).fontColor('#8ED0FF')
+                      .backgroundColor('#152B33').borderRadius(9).margin({ left: 8 })
+                      .onClick(() => { this.toggleSort(); })
+                    Button('重测失败项')
+                      .height(34).fontSize(12).fontColor('#B9B9C4')
+                      .backgroundColor('#232530').borderRadius(9).margin({ left: 8 })
+                      .onClick(() => { this.retryFailed(); })
+                  }
+                  .width('100%').margin({ bottom: 4 })
+                  Text('体检后显示响应耗时，点「按耗时」重排列表。')
+                    .fontSize(12).fontColor('#7E7E8A').width('100%').margin({ bottom: 8 })
+                  ForEach(this.sortedSaved(), (a: SavedApi, idx: number) => {
                     // 名称 + 地址 + 按钮回到同一行：接口名一般不长，信息区让出宽度给按钮
                     Row() {
                       Column() {
@@ -1054,6 +1184,12 @@ struct Settings {
                           .fontSize(11).fontColor('#5C5C68').width('100%')
                           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
                           .margin({ top: 4 })
+                        if (this.probeLabel(a.url).length > 0) {
+                          Text(this.probeLabel(a.url))
+                            .fontSize(11)
+                            .fontColor(SourceProbe.rank(a.url) === 0 ? '#7FD88A' : '#FF9A9A')
+                            .margin({ top: 4 })
+                        }
                       }
                       .layoutWeight(1)
                       .alignItems(HorizontalAlign.Start)
@@ -1207,10 +1343,12 @@ struct Settings {
 
                 if (this.lives.length > 0) {
                   Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-                    ForEach(this.lives, (l: LiveCfg, idx: number) => {
-                      Text(l.name + (LiveSrcProbe.isBad(l.url) ? ' · 空' : ''))
+                    ForEach(this.sortedLives(), (l: LiveCfg, idx: number) => {
+                      Text(l.name + (LiveSrcProbe.isBad(l.url) ? ' · 空' : '')
+                        + (this.probeLabel(l.url).length > 0 ? ' · ' + this.probeLabel(l.url) : ''))
                         .fontSize(12.5)
-                        .fontColor(LiveSrcProbe.isBad(l.url) ? '#6b6b6b' : '#cccccc')
+                        .fontColor(LiveSrcProbe.isBad(l.url) || SourceProbe.rank(l.url) === 1
+                          ? '#6b6b6b' : '#cccccc')
                         .backgroundColor(LiveSrcProbe.isBad(l.url) ? '#101116' : '#1A1B22')
                         .borderRadius(8)
                         .padding({ left: 10, right: 10, top: 4, bottom: 4 })
@@ -1275,7 +1413,7 @@ struct Settings {
               Column() {
                 if (this.sites.length > 0) {
                   this.section('资源站（选一个作为当前点播站点）')
-                  ForEach(this.sites, (s: SiteCfg) => {
+                  ForEach(this.sortedSites(), (s: SiteCfg) => {
                     Row() {
                       // 切换和删除做成平级点击区：ArkTS 的 ClickEvent 没有
                       // stopPropagation，嵌套的话点删除会连带触发整行的切换
@@ -1284,7 +1422,10 @@ struct Settings {
                           .fontColor(s.key === this.curKey ? '#FF8A3D' : '#E4E4EC')
                           .layoutWeight(1).maxLines(1)
                           .textOverflow({ overflow: TextOverflow.Ellipsis })
-                        Text('type ' + s.type).fontSize(12).fontColor('#5C5C68').margin({ right: 8 })
+                        Text(this.probeLabel(s.api).length > 0 ? this.probeLabel(s.api) : ('type ' + s.type))
+                          .fontSize(12)
+                          .fontColor(SourceProbe.rank(s.api) === 0 ? '#7FD88A' : '#FF9A9A')
+                          .margin({ right: 8 })
                         Text(s.key === this.curKey ? '当前' : '切换')
                           .fontSize(12)
                           .fontColor(s.key === this.curKey ? '#FF8A3D' : '#7FD88A')
