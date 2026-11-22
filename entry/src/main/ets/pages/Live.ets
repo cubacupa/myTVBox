@@ -5,6 +5,7 @@ import { ConfigStore } from '../utils/ConfigStore';
 import { AppState } from '../utils/AppState';
 import { LiveGroup, LiveChannel } from '../utils/LiveApi';
 import { LiveSrcProbe } from '../utils/LiveSrcProbe';
+import { LiveLineProbe } from '../utils/LiveLineProbe';
 import { LiveMarkStore, LiveFav } from '../utils/LiveMarkStore';
 import { EpgStore, EpgNowNext, EpgProg } from '../utils/EpgStore';
 import { LiveCfg } from '../model/TvBoxModels';
@@ -48,6 +49,10 @@ struct Live {
   @State @Watch('onFocusIdxChanged') focusIdx: number = 0;
   /** 预览真正播起来的线路，进入播放页时继承它，避免换个线路重新加载 */
   @State previewPlayingUrl: string = '';
+  /** 探活换线后用它强制重建大卡预览 */
+  @State previewEpoch: number = 0;
+  /** 焦点代次：探活是异步的，焦点移走后要丢弃旧焦点的探活回调 */
+  private probeGen: number = 0;
   /** 是否展开右上角「分类」下拉列表（仅全部频道视图） */
   @State showGroups: boolean = false;
   /** 「清除全部」的二次确认 */
@@ -72,6 +77,13 @@ struct Live {
 
   aboutToAppear(): void {
     this.boot();
+  }
+
+  onPageShow(): void {
+    this.previewEpoch++;
+    this.previewPlayingUrl = '';
+    this.probeGen++;
+    this.probeFocusLines();
   }
 
   aboutToDisappear(): void {
@@ -314,6 +326,40 @@ struct Live {
   /** 焦点一变就清掉上一频道的预览线路，防止进播放页时继承错频道 */
   private onFocusIdxChanged(): void {
     this.previewPlayingUrl = '';
+    this.probeGen++;
+    this.probeFocusLines();
+  }
+
+  /**
+   * 后台体检当前焦点频道的线路。只探没有「上次能播」记忆的频道。
+   * 体检结果写进缓存后，换成通过的线路时 bump previewEpoch 重建预览。
+   */
+  private probeFocusLines(): void {
+    const ch: LiveChannel | null = this.focusChannel();
+    if (ch === null || ch.lines.length < 2) {
+      return;
+    }
+    const urls: string[] = this.lineUrls(ch);
+    if (this.ctx !== null) {
+      const key: string = ch.id.length > 0 ? ch.id : ch.name;
+      if (LiveMarkStore.lastGood(this.ctx, key).length > 0) {
+        return;
+      }
+    }
+    const before: string = this.previewUrlOf(ch);
+    const gen: number = this.probeGen;
+    LiveLineProbe.probe(urls).then(() => {
+      if (gen !== this.probeGen) {
+        return;
+      }
+      if (this.previewPlayingUrl.length > 0 && urls.indexOf(this.previewPlayingUrl) >= 0) {
+        return;
+      }
+      const after: string = this.previewUrlOf(ch);
+      if (after.length > 0 && after !== before) {
+        this.previewEpoch++;
+      }
+    });
   }
 
   /** 大卡重建 key 列表：无焦点时为空（ForEach 不渲染），否则只含当前焦点频道一项 */
@@ -328,7 +374,7 @@ struct Live {
   /** 预览组件的重建 key：频道 + 当前线路，两者任一变化都强制重建播放器 */
   private previewKeyOf(ch: LiveChannel): string {
     const key: string = ch.id.length > 0 ? ch.id : ch.name;
-    return key + '|' + this.previewUrlOf(ch);
+    return key + '|' + this.previewEpoch.toString() + '|' + this.previewUrlOf(ch);
   }
 
   private previewUrlOf(ch: LiveChannel): string {
@@ -337,11 +383,17 @@ struct Live {
       return '';
     }
     const key: string = ch.id.length > 0 ? ch.id : ch.name;
+    // 上次真能播的线路最高优先，HTTP 体检无权翻案
     if (this.ctx !== null) {
       const good: string = LiveMarkStore.lastGood(this.ctx, key);
       if (urls.indexOf(good) >= 0) {
         return good;
       }
+    }
+    // 体检通过的线路：跳过失效的第一条
+    const probed: string = LiveLineProbe.firstAlive(urls);
+    if (probed.length > 0) {
+      return probed;
     }
     return urls[0];
   }
