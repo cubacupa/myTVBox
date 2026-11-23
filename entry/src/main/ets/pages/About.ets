@@ -204,7 +204,6 @@ export struct About {
     Column() {
       this.cardTitle('数据来源')
       this.credit('豆瓣公开接口', '评分、类型、片长、剧照')
-      this.credit('IPTV 公开列表', '内置直播频道表（iptv-org 整理）')
       this.credit('第三方采集站', '片名、线路、播放地址')
       this.credit('HarmonyOS ArkUI', '界面与媒体播放能力')
       Text('以上内容版权均归各自权利人所有，本应用只做展示。')
