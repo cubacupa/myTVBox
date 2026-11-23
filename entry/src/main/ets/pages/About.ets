@@ -104,12 +104,6 @@ export struct About {
           .fontSize(11.5)
           .fontColor(C_DIM)
         Row({ space: 8 }) {
-          Text(this.ver.length > 0 ? 'v' + this.ver : '')
-            .fontSize(11.5)
-            .fontColor('#FFB37A')
-            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-            .borderRadius(8)
-            .backgroundColor('#1FFF8A3D')
           Text('HarmonyOS · ArkTS')
             .fontSize(11.5)
             .fontColor(C_SUB)
@@ -188,7 +182,6 @@ export struct About {
   envCard() {
     Column() {
       this.cardTitle('版本与环境')
-      this.infoRow('版本', this.ver.length > 0 ? 'v' + this.ver : '')
       this.infoRow('包名', this.pkg.length > 0 ? this.pkg : 'com.moviebox.tv')
       this.infoRow('设备', this.model)
       this.infoRow('系统', this.osName)
