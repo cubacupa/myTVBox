@@ -987,7 +987,7 @@ struct Settings {
         })
 
       Row() {
-        SideNav({ active: 5 })
+        SideNav({ active: 6 })
         Column() {
         this.pageHeader()
 

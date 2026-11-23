@@ -388,7 +388,7 @@ struct History {
         })
 
       Row() {
-        SideNav({ active: 4 })
+        SideNav({ active: 5 })
         Column() {
           // ---------- 顶栏 ----------
           Row() {

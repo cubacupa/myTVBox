@@ -282,7 +282,7 @@ struct My {
         })
 
       Row() {
-        SideNav({ active: 3 })
+        SideNav({ active: 4 })
         Column() {
           // ---------- 顶栏 ----------
           Row() {

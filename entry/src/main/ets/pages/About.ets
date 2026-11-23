@@ -294,7 +294,7 @@ export struct About {
         })
 
       Row() {
-        SideNav({ active: 6 })
+        SideNav({ active: 7 })
         Column() {
           this.pageHeader()
 
