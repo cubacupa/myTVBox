@@ -83,7 +83,6 @@ struct Settings {
   @State scanning: boolean = false;
   @State probeBusy: boolean = false;
   @State probeTick: number = 0;
-  @State sortByLatency: boolean = false;
   @State scanTip: string = '';
   @State repoName: string = '';
   @State curKey: string = '';
@@ -225,12 +224,6 @@ struct Settings {
     this.say('体检完成');
   }
 
-  /** 只重测失败项：成功的耗时不动，省流量也省时间 */
-  private async retryFailed(): Promise<void> {
-    SourceProbe.clearFailed();
-    await this.probeSources();
-  }
-
   /** 结果在静态缓存里，换数组引用让 ForEach 重画 */
   private refreshSourceLists(): void {
     this.saved = this.saved.slice();
@@ -239,63 +232,10 @@ struct Settings {
     this.rows = this.rows.slice();
   }
 
-  private toggleSort(): void {
-    this.sortByLatency = !this.sortByLatency;
-    this.refreshSourceLists();
-  }
-
   private probeLabel(url: string): string {
     // 读一下 tick，让体检完成后的 @State 变化把这段文本一起重画
     const tick: number = this.probeTick;
     return tick >= 0 ? SourceProbe.label(url) : '';
-  }
-
-  private sortedSaved(): SavedApi[] {
-    if (!this.sortByLatency) {
-      return this.saved;
-    }
-    const arr: SavedApi[] = this.saved.slice();
-    arr.sort((a: SavedApi, b: SavedApi): number => {
-      const ra: number = SourceProbe.rank(a.url), rb: number = SourceProbe.rank(b.url);
-      if (ra !== rb) {
-        return ra - rb;
-      }
-      const la: number = SourceProbe.latency(a.url), lb: number = SourceProbe.latency(b.url);
-      return la === lb ? 0 : (la < lb ? -1 : 1);
-    });
-    return arr;
-  }
-
-  private sortedSites(): SiteCfg[] {
-    if (!this.sortByLatency) {
-      return this.sites;
-    }
-    const arr: SiteCfg[] = this.sites.slice();
-    arr.sort((a: SiteCfg, b: SiteCfg): number => {
-      const ra: number = SourceProbe.rank(a.api), rb: number = SourceProbe.rank(b.api);
-      if (ra !== rb) {
-        return ra - rb;
-      }
-      const la: number = SourceProbe.latency(a.api), lb: number = SourceProbe.latency(b.api);
-      return la === lb ? 0 : (la < lb ? -1 : 1);
-    });
-    return arr;
-  }
-
-  private sortedLives(): LiveCfg[] {
-    if (!this.sortByLatency) {
-      return this.lives;
-    }
-    const arr: LiveCfg[] = this.lives.slice();
-    arr.sort((a: LiveCfg, b: LiveCfg): number => {
-      const ra: number = SourceProbe.rank(a.url), rb: number = SourceProbe.rank(b.url);
-      if (ra !== rb) {
-        return ra - rb;
-      }
-      const la: number = SourceProbe.latency(a.url), lb: number = SourceProbe.latency(b.url);
-      return la === lb ? 0 : (la < lb ? -1 : 1);
-    });
-    return arr;
   }
 
   // ---------- 手机扫码推送 ----------
@@ -1026,16 +966,6 @@ struct Settings {
                 .justifyContent(FlexAlign.End)
                 .margin({ top: 10 })
 
-                Text('当前：' + (this.configName.length > 0 ? this.configName : '未命名')
-                  + (this.repoName ? ' · 仓库「' + this.repoName + '」' : '')
-                  + ' · 可用站点 ' + this.usableCount + ' 个'
-                  + ' · 解析 ' + this.parseCount + ' 个'
-                  + (this.dropped > 0 ? ' · 已过滤 ' + this.dropped + ' 个 spider 站点（不显示）' : ''))
-                  .fontSize(13)
-                  .fontColor('#8E8E9A')
-                  .width('100%')
-                  .margin({ top: 8 })
-
                 if (this.errMsg) {
                   Text('存储提示：' + this.errMsg)
                     .fontSize(12).fontColor('#FF9A9A').width('100%').margin({ top: 6 })
@@ -1136,26 +1066,7 @@ struct Settings {
               Column() {
                 if (this.saved.length > 0) {
                   this.section('已保存的接口')
-                  Row() {
-                    Button(this.probeBusy ? '体检中…' : '体检')
-                      .height(34).fontSize(12)
-                      .fontColor(this.probeBusy ? '#8E8E9A' : '#150A04')
-                      .backgroundColor(this.probeBusy ? '#232530' : '#FF8A3D')
-                      .borderRadius(9)
-                      .onClick(() => { this.probeSources(); })
-                    Button(this.sortByLatency ? '按耗时 ✓' : '按耗时')
-                      .height(34).fontSize(12).fontColor('#8ED0FF')
-                      .backgroundColor('#152B33').borderRadius(9).margin({ left: 8 })
-                      .onClick(() => { this.toggleSort(); })
-                    Button('重测失败项')
-                      .height(34).fontSize(12).fontColor('#B9B9C4')
-                      .backgroundColor('#232530').borderRadius(9).margin({ left: 8 })
-                      .onClick(() => { this.retryFailed(); })
-                  }
-                  .width('100%').margin({ bottom: 4 })
-                  Text('体检后显示响应耗时，点「按耗时」重排列表。')
-                    .fontSize(12).fontColor('#7E7E8A').width('100%').margin({ bottom: 8 })
-                  ForEach(this.sortedSaved(), (a: SavedApi, idx: number) => {
+                  ForEach(this.saved, (a: SavedApi, idx: number) => {
                     // 名称 + 地址 + 按钮回到同一行：接口名一般不长，信息区让出宽度给按钮
                     Row() {
                       Column() {
@@ -1343,7 +1254,7 @@ struct Settings {
 
                 if (this.lives.length > 0) {
                   Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-                    ForEach(this.sortedLives(), (l: LiveCfg, idx: number) => {
+                    ForEach(this.lives, (l: LiveCfg, idx: number) => {
                       Text(l.name + (LiveSrcProbe.isBad(l.url) ? ' · 空' : '')
                         + (this.probeLabel(l.url).length > 0 ? ' · ' + this.probeLabel(l.url) : ''))
                         .fontSize(12.5)
@@ -1411,9 +1322,38 @@ struct Settings {
               .border({ width: 1, color: C_LINE })
               // ---------- 资源站（只列可用） ----------
               Column() {
+                // 标题 + 体检按钮同一行，按钮居右。
+                // 体检范围含地址簿 + 站点 + 直播源 + 仓库，不裹在 sites.length>0 里。
+                Row() {
+                  Row({ space: 9 }) {
+                    Row()
+                      .width(3)
+                      .height(13)
+                      .borderRadius(2)
+                      .backgroundColor(C_ACCENT)
+                    Text('资源站（选一个作为当前点播站点）')
+                      .fontSize(13.5)
+                      .fontColor('#C9C9D4')
+                      .fontWeight(FontWeight.Medium)
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  }
+                  .layoutWeight(1)
+                  .alignItems(VerticalAlign.Center)
+
+                  Button(this.probeBusy ? '体检中…' : '体检')
+                    .height(34).fontSize(12)
+                    .fontColor(this.probeBusy ? '#8E8E9A' : '#150A04')
+                    .backgroundColor(this.probeBusy ? '#232530' : '#FF8A3D')
+                    .borderRadius(9)
+                    .onClick(() => { this.probeSources(); })
+                }
+                .width('100%')
+                .margin({ top: 12, bottom: 14 })
+                .alignItems(VerticalAlign.Center)
+
                 if (this.sites.length > 0) {
-                  this.section('资源站（选一个作为当前点播站点）')
-                  ForEach(this.sortedSites(), (s: SiteCfg) => {
+                  ForEach(this.sites, (s: SiteCfg) => {
                     Row() {
                       // 切换和删除做成平级点击区：ArkTS 的 ClickEvent 没有
                       // stopPropagation，嵌套的话点删除会连带触发整行的切换

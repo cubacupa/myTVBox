@@ -62,31 +62,13 @@ export class SourceProbe {
     return SourceProbe.running;
   }
 
-  /** 用户点「重测失败项」时只清失败的，成功的耗时保留 */
-  static clearFailed(): void {
-    const dead: string[] = [];
-    for (const r of SourceProbe.cache.values()) {
-      if (!r.ok) {
-        dead.push(r.url);
-      }
-    }
-    for (const u of dead) {
-      SourceProbe.cache.delete(u);
-    }
-  }
-
-  /** 有通过的吗——给「按耗时」排序用：成功永远排失败前面 */
+  /** 体检结果档位：0 通过 / 1 失败 / 2 未测，站点行用它上红绿配色 */
   static rank(url: string): number {
     const r: ProbeResult | undefined = SourceProbe.result(url);
     if (r === undefined) {
       return 2;
     }
     return r.ok ? 0 : 1;
-  }
-
-  static latency(url: string): number {
-    const r: ProbeResult | undefined = SourceProbe.result(url);
-    return r === undefined ? Number.MAX_VALUE : r.ms;
   }
 
   /**
